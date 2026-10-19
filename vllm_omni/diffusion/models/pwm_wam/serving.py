@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 class NativeService:
-    def __init__(self, checkpoint, vae, tokenizer, output_dir, attention_backend="sdpa"):
+    def __init__(self, checkpoint, vae, tokenizer, output_dir, attention_backend="sdpa", cache_und=False):
         from vllm_omni.diffusion.data import OmniDiffusionConfig
         from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
 
@@ -35,6 +35,7 @@ class NativeService:
             "contract_sha256": hashlib.sha256(json.dumps(self.spec, sort_keys=True).encode()).hexdigest(),
             "precision": "bfloat16",
             "compile": False,
+            "native_und_cache": cache_und,
             "world_size": 1,
             "max_concurrent_requests": 1,
             "output_dir": str(self.output_dir),
@@ -48,6 +49,7 @@ class NativeService:
                     "pwm_vae_path": str(vae),
                     "pwm_tokenizer_path": str(tokenizer),
                     "pwm_attention_backend": attention_backend,
+                    "pwm_native_und_cache": cache_und,
                 },
             )
         )
@@ -174,10 +176,13 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--attention-backend", choices=("sdpa",), default="sdpa")
     parser.add_argument("--warmup-input", type=Path)
+    parser.add_argument("--cache-und", action="store_true", help="Enable request-local UND reuse")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8019)
     args = parser.parse_args()
-    service = NativeService(args.checkpoint, args.vae, args.tokenizer, args.output_dir, args.attention_backend)
+    service = NativeService(
+        args.checkpoint, args.vae, args.tokenizer, args.output_dir, args.attention_backend, args.cache_und
+    )
     try:
         if args.warmup_input:
             raw = json.loads(args.warmup_input.read_text())

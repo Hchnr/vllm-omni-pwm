@@ -65,6 +65,9 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             The way the timesteps should be scaled.
         final_sigmas_type (`str`, defaults to `"zero"`):
             The final `sigma` value for the noise schedule. Either `"zero"` or `"sigma_min"`.
+        use_legacy_corrector (`bool`, defaults to `False`):
+            Reproduce PyTorch 2.10 CUDA 2x2 corrector rounding for frozen
+            checkpoints. Requires CPU coefficients and solver_order=2.
         use_cpu_coefficients (`bool`, defaults to `False`):
             Keep scalar schedule arithmetic on CPU for checkpoint runtimes that
             require that numerical convention. Tensor state remains on its device.
@@ -93,6 +96,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
         steps_offset: int = 0,
         final_sigmas_type: str | None = "zero",
         use_cpu_coefficients: bool = False,
+        use_legacy_corrector: bool = False,
         **kwargs,
     ):
         if solver_type not in ["bh1", "bh2"]:
@@ -101,6 +105,8 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             else:
                 raise NotImplementedError(f"{solver_type} is not implemented for {self.__class__}")
 
+        if use_legacy_corrector and (not use_cpu_coefficients or solver_order != 2):
+            raise ValueError("Legacy corrector requires CPU coefficients and solver_order=2")
         self.predict_x0 = predict_x0
         self.num_inference_steps: int | None = None
 
@@ -410,7 +416,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             D1s.append((mi - m0) / rk)
 
         rks.append(1.0)
-        rks = torch.tensor(rks, device=device)
+        rks = torch.tensor(rks, device="cpu" if self.config.use_legacy_corrector else device)
 
         R = []
         b = []
@@ -435,7 +441,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             h_phi_k = h_phi_k / hh - 1 / factorial_i
 
         R = torch.stack(R)
-        b = torch.tensor(b, device=device)
+        b = torch.tensor(b, device="cpu" if self.config.use_legacy_corrector else device)
 
         if D1s is not None and len(D1s) > 0:
             D1s = torch.stack(D1s, dim=1)
@@ -542,7 +548,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             D1s.append((mi - m0) / rk)
 
         rks.append(1.0)
-        rks = torch.tensor(rks, device=device)
+        rks = torch.tensor(rks, device="cpu" if self.config.use_legacy_corrector else device)
 
         R = []
         b = []
@@ -567,7 +573,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             h_phi_k = h_phi_k / hh - 1 / factorial_i
 
         R = torch.stack(R)
-        b = torch.tensor(b, device=device)
+        b = torch.tensor(b, device="cpu" if self.config.use_legacy_corrector else device)
 
         if D1s is not None and len(D1s) > 0:
             D1s = torch.stack(D1s, dim=1)
@@ -576,6 +582,16 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
 
         if order == 1:
             rhos_c = torch.tensor([0.5], dtype=x.dtype, device=device)
+        elif self.config.use_legacy_corrector:
+            # PyTorch 2.10's CUDA 2x2 solve used this elimination order for
+            # R=[[1,1],[rk,1]]. Newer solvers round the small first result
+            # differently, which can amplify across BF16 model evaluations.
+            # Emulate the FP32 fused numerator with exact FP64 intermediates
+            # on CPU, then round before FP32 division and back substitution.
+            rk = R[1, 0]
+            numerator = (b[1].double() - rk.double() * b[0].double()).float()
+            second = numerator / (1 - rk)
+            rhos_c = torch.stack((b[0] - second, second)).to(device=device, dtype=x.dtype)
         else:
             rhos_c = safe_linalg_solve(R, b).to(device).to(x.dtype)
 

@@ -42,3 +42,21 @@ def test_cuda_unipc_matches_reference_cpu_coefficients(steps):
         expected = reference.step(velocity, timestep, expected, return_dict=False)[0]
         observed = actual.step(velocity, timestep, observed, return_dict=False)[0]
         torch.testing.assert_close(observed, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("steps", [5, 10, 35])
+def test_legacy_corrector_matches_frozen_torch210_cuda_trajectory(steps):
+    if os.environ.get("PWM_CUDA_GOLDEN") != "1":
+        pytest.skip("Set PWM_CUDA_GOLDEN=1 for the CUDA golden fixture")
+    import numpy as np
+    from safetensors.torch import load_file
+
+    golden = load_file(str(Path(__file__).parent / "fixtures/unipc_torch210.safetensors"))
+    scheduler = FlowUniPCMultistepScheduler(use_cpu_coefficients=True, use_legacy_corrector=True)
+    scheduler.set_timesteps(steps, device="cuda", shift=5)
+    rng = np.random.RandomState(123)
+    state = torch.from_numpy(rng.standard_normal((1, 128)).astype("float32")).to("cuda")
+    for index, timestep in enumerate(scheduler.timesteps):
+        velocity = torch.from_numpy(rng.standard_normal((128,)).astype("float32")).to("cuda", torch.bfloat16)
+        state = scheduler.step(model_output=velocity, timestep=timestep, sample=state, return_dict=False)[0]
+        torch.testing.assert_close(state.cpu(), golden[f"{steps}.state.{index:02d}"], atol=0, rtol=0)

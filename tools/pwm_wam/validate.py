@@ -59,6 +59,9 @@ def main():
     result["args"]["input"] = [str(p) for p in args.input]
     result["input_sha256"] = [hashlib.sha256(p.read_bytes()).hexdigest() for p in args.input]
     result["fork_revision"] = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    diff = subprocess.check_output(["git", "diff", "HEAD", "--"], text=True)
+    result["fork_dirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], text=True).strip())
+    result["fork_diff_sha256"] = hashlib.sha256(diff.encode()).hexdigest()
     result["cosmos_revision"] = subprocess.check_output(
         ["git", "-C", str(args.cosmos_root), "rev-parse", "HEAD"], text=True
     ).strip()

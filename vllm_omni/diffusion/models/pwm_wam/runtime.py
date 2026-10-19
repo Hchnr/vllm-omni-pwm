@@ -144,7 +144,11 @@ class PwmWamRuntime(nn.Module):
             cache = [[] for _ in self.transformer.language_model.model.layers] if self.cache_und else None
             branches.append((ids, ropes, action_ropes, cache))
         scheduler = FlowUniPCMultistepScheduler(
-            num_train_timesteps=1000, shift=1.0, use_dynamic_shifting=False, use_cpu_coefficients=True
+            num_train_timesteps=1000,
+            shift=1.0,
+            use_dynamic_shifting=False,
+            use_cpu_coefficients=True,
+            use_legacy_corrector=True,
         )
         scheduler.set_timesteps(request.steps, device=self.device, shift=request.shift)
         generator = torch.Generator(device=self.device).manual_seed(request.seed)
