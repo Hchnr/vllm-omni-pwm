@@ -34,6 +34,7 @@ def resolve_native_single_file(model_class_name: str | None) -> str | None:
 
 
 _DIFFUSION_MODELS = {
+    "PwmWamPipeline": ("pwm_wam", "pipeline_pwm_wam", "PwmWamPipeline"),
     # arch:(mod_folder, mod_relname, cls_name)
     "SeedVR2Pipeline": ("seedvr2", "pipeline_seedvr2", "SeedVR2Pipeline"),
     "QwenImagePipeline": (
