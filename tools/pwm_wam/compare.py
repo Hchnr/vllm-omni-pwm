@@ -118,7 +118,13 @@ def main():
     result["timing_comparable"] = comparable
     result["reference_is_optimized_deployment"] = optimized_reference(reference)
     result["backend_pair"] = [ra.get("attention_backend"), ca.get("attention_backend")]
-    result["deployment_speedup_eligible"] = comparable and optimized_reference(reference) and result["passed"]
+    result["deployment_speedup_eligible"] = (
+        comparable
+        and optimized_reference(reference)
+        and ca.get("mode") == "engine"
+        and ca.get("native") is True
+        and result["passed"]
+    )
     result["timing_caveat"] = (
         "Matching configuration does not establish GPU exclusivity. Inspect gpu_processes_before/after; "
         "co-tenant activity invalidates an exclusive-hardware performance claim."

@@ -20,7 +20,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("worker", "engine"), required=True)
+    parser.add_argument("--mode", choices=("worker", "engine", "runtime"), required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--cosmos-root", type=Path, required=True)
     parser.add_argument("--python", type=Path, required=True)
@@ -41,12 +41,14 @@ def main():
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
     args = parser.parse_args()
-    if args.native and (args.mode != "engine" or not args.vae or not args.tokenizer):
-        parser.error("--native requires engine mode, --vae, and --tokenizer")
+    if args.native and (args.mode not in ("engine", "runtime") or not args.vae or not args.tokenizer):
+        parser.error("--native requires engine/runtime mode, --vae, and --tokenizer")
     if args.native and (args.reuse_und or args.projected_und or args.precision != "bfloat16"):
-        parser.error("Native validation currently requires BF16 without UND reuse")
+        parser.error("Native validation requires BF16; use --native-und-cache for native caching")
     if args.native_und_cache and not args.native:
         parser.error("--native-und-cache requires --native")
+    if args.mode == "runtime" and not args.native:
+        parser.error("Experimental runtime mode requires --native")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     requests = [json.loads(p.read_text()) for p in args.input]
     for request in requests:
@@ -131,6 +133,29 @@ def main():
             process.stdin.close()
             process.wait(timeout=30)
             log.close()
+    elif args.mode == "runtime":
+        import torch
+
+        from vllm_omni.diffusion.models.pwm_wam.runtime import PwmWamRuntime
+
+        model = PwmWamRuntime(
+            args.checkpoint,
+            vae_path=str(args.vae),
+            tokenizer_path=str(args.tokenizer),
+            attention_backend=args.attention_backend,
+            compile_layers=args.compile,
+            cache_und=args.native_und_cache,
+        )
+        result["experimental_runtime_only"] = True
+        result["runtime"] = {"torch": torch.__version__}
+
+        def run(request, index):
+            with torch.inference_mode():
+                output, _, _ = model(request)
+            return output
+
+        def close():
+            pass
     else:
         from vllm_omni.diffusion.data import OmniDiffusionConfig
         from vllm_omni.diffusion.diffusion_engine import DiffusionEngine

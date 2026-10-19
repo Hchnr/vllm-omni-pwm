@@ -124,3 +124,19 @@ The earlier `PwmWamPipeline` compatibility adapter is retained for reference
 experiments. It uses `pwm_python`/`pwm_cosmos_root` and runs a Cosmos subprocess;
 it is not the native implementation. Its projected-UND/compile experiments
 must not be used as acceptance evidence against the stricter eager baseline.
+
+### Optimized deployment comparison
+
+Use `validate.py --mode worker --attention-backend flash3 --compile` for the
+existing Cosmos baseline (metadata reuse is enabled by the worker). Keep
+checkpoint, request JSON/assets, seed, steps, CFG, output mode, warmup and repeats
+fixed. Run baseline/candidate/baseline on the same physical GPU and inspect
+co-tenant load. `compare.py` reports deployment eligibility separately from
+numerical correctness; eager SDPA cannot qualify as this baseline.
+
+`validate.py --mode runtime --native` measures experimental native backend and
+compiler combinations with the same timing/provenance harness. It bypasses the
+engine's production configuration guard for investigation only. These results
+are not an end-to-end vLLM deployment acceptance; final measurements must use
+`--mode engine --native`. Different attention implementations are permitted in
+a performance comparison, but numerical tolerances and workload remain fixed.
