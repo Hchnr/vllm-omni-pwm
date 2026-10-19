@@ -82,12 +82,17 @@ Two 1,000-request small-resolution stress runs (cache off/on) had exact
 replay hashes. A real HTTP disconnect retained model ownership until completion
 and recovered with exact actions.
 
+Performance acceptance is **not complete**. The deployment baseline is Cosmos
+FA3 + per-layer compile + request-local metadata reuse, with HTTP CUDA Graph,
+UND compute caching and QKV fusion disabled. Native superiority over that
+baseline has not been established. Eager SDPA is a numerical reference only.
+
 On the task's shared H100 80GB, same-GPU A/B/A against eager SDPA (two inputs,
 two warmups and twenty measurements per input per stage), native UND caching
 reduced each input's p50 by 8.8–9.7% and increased aggregate hot-request
 throughput by 9.6–10.6%. All measured outputs matched exactly. Co-tenant activity
 was recorded; these are not exclusive-GPU numbers or comparisons against the
-unaccepted compiled/FA3 configurations. Startup was slower (about 129 seconds
+existing optimized Cosmos deployment. Startup was slower (about 129 seconds
 versus 52 seconds for the first reference stage); prefer persistent serving.
 Raw results are in `artifacts/validation/final_native_acceptance.json` and
 `native_cache_ab_{reference_before,candidate,reference_after}.json` locally.
@@ -99,8 +104,9 @@ A frozen PyTorch 2.10 CUDA fixture checks complete solver trajectories from a
 different runtime version. Same-environment reference-source tests alone did
 not catch the corrector rounding difference.
 
-Native FA3 failed full-trajectory tolerance (second initial input max-abs
-0.14824, RMSE 0.02445). The production pipeline rejects FA3 and compilation.
+An earlier native FA3 experiment failed full-trajectory tolerance (second
+initial input max-abs 0.14824, RMSE 0.02445), before the final UniPC rounding
+fix; that historical failure must be retested at the current revision. The production pipeline rejects FA3 and compilation.
 Quantization, LoRA, generic diffusion caches, step batching, TP/CP, offload,
 sleep mode, autoregression and state/action conditioning are unsupported and
 rejected. The standalone `validate_native.py` retains backend/compile options
