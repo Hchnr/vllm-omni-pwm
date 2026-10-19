@@ -26,6 +26,9 @@ def main():
     parser.add_argument("--input", type=Path, nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reference-config", type=Path)
+    parser.add_argument("--native", action="store_true")
+    parser.add_argument("--vae", type=Path)
+    parser.add_argument("--tokenizer", type=Path)
     parser.add_argument("--attention-backend", choices=("flash3", "sdpa"), default="flash3")
     parser.add_argument("--precision", choices=("bfloat16", "float32"), default="bfloat16")
     parser.add_argument("--compile", action="store_true")
@@ -36,6 +39,10 @@ def main():
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
     args = parser.parse_args()
+    if args.native and (args.mode != "engine" or not args.vae or not args.tokenizer):
+        parser.error("--native requires engine mode, --vae, and --tokenizer")
+    if args.native and (args.reuse_und or args.projected_und or args.precision != "bfloat16"):
+        parser.error("Native validation currently requires BF16 without UND reuse")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     requests = [json.loads(p.read_text()) for p in args.input]
     for request in requests:
@@ -114,7 +121,7 @@ def main():
         engine = DiffusionEngine(
             OmniDiffusionConfig(
                 model=str(args.checkpoint),
-                model_class_name="PwmWamPipeline",
+                model_class_name="PwmWamNativePipeline" if args.native else "PwmWamPipeline",
                 enforce_eager=True,
                 model_config={
                     "pwm_python": str(args.python),
@@ -124,6 +131,8 @@ def main():
                     "pwm_projected_und": args.projected_und,
                     "pwm_precision": args.precision,
                     "pwm_attention_backend": args.attention_backend,
+                    "pwm_vae_path": str(args.vae) if args.vae else None,
+                    "pwm_tokenizer_path": str(args.tokenizer) if args.tokenizer else None,
                 },
             )
         )

@@ -28,3 +28,37 @@ Generic caching, step batching, parallelism, sleep and offload are unsupported.
 UND caching is opt-in: enable both `pwm_reuse_und` and `pwm_projected_und` to use
 the projected-key cache. The legacy normalized-key cache fails the BF16
 compiled acceptance test and must not be treated as the validated optimization.
+
+## Native worker implementation (validation in progress)
+
+`PwmWamNativePipeline` runs the three towers, Wan VAE, tokenizer, and UniPC in
+one Omni worker process. It does not import Cosmos or spawn its runtime.
+Use `model_class_name="PwmWamNativePipeline"` and model config fields
+`pwm_vae_path`, `pwm_tokenizer_path`, `pwm_attention_backend` (`sdpa` or
+`flash3`), and optional `pwm_compile` (default false). Set `enforce_eager=True`
+on Omni: the optional PWM compile switch controls only transformer layers.
+Native request schema is the same `extra_args.pwm_request` envelope as above;
+conditioning currently accepts a local image. One GPU, one request per forward.
+Sleep/offload, generic cache backends, quantization, and LoRA are rejected.
+
+Full HF tensor coverage and real-request 36-layer velocity fixture replay are
+exact with SDPA. The VAE adapter preserves the checkpoint's BF16 RMSNorm
+arithmetic; newer Diffusers otherwise upcasts that normalization and changes
+conditioning. End-to-end acceptance and performance gates remain in progress;
+FA3 and compile are explicit experimental choices until those gates pass.
+
+Standalone native validation (Omni environment only):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 LD_LIBRARY_PATH='' .venv/bin/python tools/pwm_wam/validate_native.py \
+  --checkpoint artifacts/pwm-wam-hf \
+  --vae /path/to/Cosmos3-Nano/vae --tokenizer /path/to/Cosmos3-Nano-VLM \
+  --input /path/to/request.json --output /path/to/native_result.json
+```
+
+For actual Omni engine verification use `validate.py --mode engine --native`
+with `--vae`, `--tokenizer`, and `--attention-backend sdpa`. The legacy
+`--cosmos-root` and `--python` arguments still populate provenance; native
+execution does not use that interpreter. `capture_native_fixture.py` is
+reference-only tooling and must run in the Cosmos environment. Its safetensors
+fixtures are validation artifacts, not production inputs.

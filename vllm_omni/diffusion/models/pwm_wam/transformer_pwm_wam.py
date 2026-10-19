@@ -39,7 +39,27 @@ def rotate(x: Tensor, rope: Rope) -> Tensor:
     return x * rope[0][:, None] + torch.cat((-right, left), dim=-1) * rope[1][:, None]
 
 
-def attention(q: Tensor, k: Tensor, v: Tensor, *, causal: bool = False) -> Tensor:
+def attention(q: Tensor, k: Tensor, v: Tensor, *, causal: bool = False, backend: str = "sdpa") -> Tensor:
+    if backend == "flash3":
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+        cu_q = torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device)
+        cu_k = torch.tensor([0, k.shape[0]], dtype=torch.int32, device=k.device)
+        result = flash_attn_varlen_func(
+            q=q.contiguous(),
+            k=k.contiguous(),
+            v=v.contiguous(),
+            cu_seqlens_q=cu_q,
+            cu_seqlens_k=cu_k,
+            max_seqlen_q=q.shape[0],
+            max_seqlen_k=k.shape[0],
+            causal=causal,
+            softmax_scale=q.shape[-1] ** -0.5,
+            fa_version=3,
+        )
+        return result.flatten(1)
+    if backend != "sdpa":
+        raise ValueError(f"Unsupported native PWM attention backend: {backend}")
     mask = torch.ones((q.shape[0], k.shape[0]), dtype=torch.bool, device=q.device)
     if causal:
         mask = mask.tril()
@@ -109,6 +129,7 @@ class PwmThreeTowerLayer(nn.Module):
     ):
         super().__init__()
         self.self_attn = PwmAttentionWeights(width, video=True, heads=heads, kv_heads=kv_heads, dim=dim)
+        self.attention_backend = "sdpa"
         self.input_layernorm = PwmRMSNorm(width)
         self.input_layernorm_moe_gen = PwmRMSNorm(width)
         self.post_attention_layernorm = PwmRMSNorm(width)
@@ -126,10 +147,18 @@ class PwmThreeTowerLayer(nn.Module):
         qv, kv, vv = attn.project(self.input_layernorm_moe_gen(video), "_moe_gen")
         qa, ka, va = act.project(act.input_layernorm(action))
         keys, values = (ku, kv, ka), (vu, vv, va)
-        yu = attention(rotate(qu, rope[0]), rotate(ku, rope[0]), vu, causal=True)
-        yv = attention(rotate(qv, rope[1]), torch.cat([rotate(k, r) for k, r in zip(keys, rope)]), torch.cat(values))
+        yu = attention(rotate(qu, rope[0]), rotate(ku, rope[0]), vu, causal=True, backend=self.attention_backend)
+        yv = attention(
+            rotate(qv, rope[1]),
+            torch.cat([rotate(k, r) for k, r in zip(keys, rope)]),
+            torch.cat(values),
+            backend=self.attention_backend,
+        )
         ya = attention(
-            rotate(qa, action_rope[2]), torch.cat([rotate(k, r) for k, r in zip(keys, action_rope)]), torch.cat(values)
+            rotate(qa, action_rope[2]),
+            torch.cat([rotate(k, r) for k, r in zip(keys, action_rope)]),
+            torch.cat(values),
+            backend=self.attention_backend,
         )
         action = action + act.o_proj(ya)
         action = action + act.mlp(act.post_attention_layernorm(action))

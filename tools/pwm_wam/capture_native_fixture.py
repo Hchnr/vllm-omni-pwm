@@ -71,6 +71,14 @@ def create(*args, **kwargs):
     for name in ("time_embedder", "action_time_embedder", "vae2llm", "action2llm"):
         getattr(net, name).register_forward_hook(hook(name), with_kwargs=True)
     net.register_forward_hook(hook("network"), with_kwargs=True)
+    prepare = inference.model._prepare_inference_data
+
+    def capture_prepare(*args, **kwargs):
+        result = prepare(*args, **kwargs)
+        save_tree("preparation", {"inputs": args, "kwargs": kwargs, "output": result})
+        return result
+
+    inference.model._prepare_inference_data = capture_prepare
     return inference
 
 
