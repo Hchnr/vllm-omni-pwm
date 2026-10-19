@@ -65,8 +65,9 @@ def canvas_seam(roles, layout, height, width):
 def prepare_request(raw: dict, spec: dict) -> PwmRequest:
     if not isinstance(raw, dict):
         raise ValueError("WAM request must be an object")
-    if raw.get("action_path") is not None:
-        raise ValueError("Native no-state WAM does not accept action conditioning")
+    for field in ("action_path", "state_path", "robot_state", "condition_frame_indexes_action"):
+        if raw.get(field) not in (None, []):
+            raise ValueError(f"Native no-state WAM does not accept {field}")
     if raw.get("model_mode") != "wam":
         raise ValueError("Native PWM requires model_mode='wam'")
     for flag in ("autoregressive", "enable_sound", "native_prompt_upsampling"):
@@ -106,7 +107,9 @@ def prepare_request(raw: dict, spec: dict) -> PwmRequest:
     height, width = pixels.shape[-2:]
     roles, layout = ext.get("selected_roles", ["main"]), ext.get("camera_layout")
     canvas_seam(roles, layout, height, width)
-    target_h = raw.get("image_size") or 16 * math.ceil(height / 16)
+    target_h = raw.get("image_size")
+    if target_h is None:
+        target_h = 16 * math.ceil(height / 16)
     if type(target_h) is not int or target_h <= 0 or target_h % 16:
         raise ValueError("image_size must be a positive multiple of 16")
     target_w = max(16, 16 * round(width * target_h / height / 16))
@@ -131,9 +134,9 @@ def prepare_request(raw: dict, spec: dict) -> PwmRequest:
                 layout[2][2:] = [target_w - left, target_h - seam]
         height, width = target_h, target_w
     seam = canvas_seam(roles, layout, height, width)
-    fps = float(raw.get("fps") or 24)
-    action_fps = float(ext.get("action_fps") or fps)
-    length = raw.get("action_chunk_size") or 16
+    fps = float(24 if raw.get("fps") is None else raw["fps"])
+    action_fps = float(fps if ext.get("action_fps") is None else ext["action_fps"])
+    length = 16 if raw.get("action_chunk_size") is None else raw["action_chunk_size"]
     if not math.isfinite(fps) or not 0 < fps <= 30 or not math.isfinite(action_fps) or not 0 < action_fps <= 512:
         raise ValueError("Invalid video or action FPS")
     if type(length) is not int or length < 1 or length / action_fps > 2:

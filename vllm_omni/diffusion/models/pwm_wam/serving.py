@@ -172,7 +172,7 @@ def main():
     parser.add_argument("--vae", type=Path, required=True)
     parser.add_argument("--tokenizer", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--attention-backend", choices=("sdpa", "flash3"), default="sdpa")
+    parser.add_argument("--attention-backend", choices=("sdpa",), default="sdpa")
     parser.add_argument("--warmup-input", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8019)

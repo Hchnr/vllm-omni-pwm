@@ -75,3 +75,12 @@ are saved under unique server-generated directories and served through
 `/outputs`; `/info` exposes configuration/contract hashes and warmup status.
 GPU integration and original-client acceptance are tracked separately from
 model-free HTTP tests. Do not infer benchmark acceptance from HTTP unit tests.
+
+Native acceptance update: BF16 eager SDPA matches the original eager DCP
+reference exactly for two full five-step action trajectories and all ten
+conditional/unconditional network boundaries of the second request. Native
+FA3 failed the final action tolerance (second input max-abs 0.14824, RMSE
+0.02445); the production native pipeline now rejects FA3 and compilation.
+The standalone replay/runtime tools retain them only for investigations.
+`--native-und-cache` enables an experimental request-local UND cache in engine
+validation. It is off by default and cannot be combined with compilation.

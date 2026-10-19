@@ -36,7 +36,7 @@ def main():
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--reuse-und", action="store_true")
     parser.add_argument("--projected-und", action="store_true")
-    parser.add_argument("--steps", type=int, default=5)
+    parser.add_argument("--steps", type=int, help="Override steps; otherwise preserve each request")
     parser.add_argument("--check-invalid-request", action="store_true")
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
@@ -48,7 +48,9 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     requests = [json.loads(p.read_text()) for p in args.input]
     for request in requests:
-        request["num_steps"] = args.steps
+        if args.steps is not None:
+            request["num_steps"] = args.steps
+        request.setdefault("num_steps", 30)
     result = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),

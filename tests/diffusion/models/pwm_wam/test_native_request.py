@@ -78,3 +78,18 @@ def test_rejects_invalid_contract(contract, change):
         raw["model_mode"] = "inverse_dynamics"
     with pytest.raises(ValueError):
         native.prepare_request(raw, spec)
+
+
+@pytest.mark.parametrize("field", ["fps", "action_chunk_size", "image_size"])
+def test_explicit_zero_is_not_silently_defaulted(contract, field):
+    raw, spec = contract
+    raw[field] = 0
+    with pytest.raises(ValueError):
+        native.prepare_request(raw, spec)
+
+
+def test_zero_action_fps_rejected(contract):
+    raw, spec = contract
+    raw["extra"]["action128"]["action_fps"] = 0
+    with pytest.raises(ValueError):
+        native.prepare_request(raw, spec)
