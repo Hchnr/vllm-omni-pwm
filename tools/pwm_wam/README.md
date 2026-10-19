@@ -70,15 +70,27 @@ recorded co-tenant processes before interpreting timing.
 
 ## Numerical acceptance and limits
 
-Fourteen independent-reference cases now match **exactly** in normalized and
-physical actions: real LIBERO/DROID/RoboCasa observations, 12 new fixed seeds
+Sixteen independent-reference cases now match **exactly** in normalized and
+physical actions: real LIBERO/DROID/RoboCasa/RoboTwin observations, 12 new fixed seeds
 plus two original seeds, one/two/three camera layouts, CFG 1/1.5, 5/10/35 steps,
 short/two-second horizons and different video/action FPS. Reduced-resolution
 cases test the numerical contract; they do not establish robot task quality.
-The matrix includes native request-local UND caching. Original-client action,
+The matrix includes native request-local UND caching, five source domains,
+projection IDs 0/2 and 10/14/20 active action dimensions. Original-client action,
 video download/decode, warmup-to-HTTP-thread and A/B/A/restart replay also pass.
-Performance and sustained-request results are recorded separately in the task
-report; unit tests alone are not benchmark evidence.
+Two 1,000-request small-resolution stress runs (cache off/on) had exact
+replay hashes. A real HTTP disconnect retained model ownership until completion
+and recovered with exact actions.
+
+On the task's shared H100 80GB, same-GPU A/B/A against eager SDPA (two inputs,
+two warmups and twenty measurements per input per stage), native UND caching
+reduced each input's p50 by 8.8–9.7% and increased aggregate hot-request
+throughput by 9.6–10.6%. All measured outputs matched exactly. Co-tenant activity
+was recorded; these are not exclusive-GPU numbers or comparisons against the
+unaccepted compiled/FA3 configurations. Startup was slower (about 129 seconds
+versus 52 seconds for the first reference stage); prefer persistent serving.
+Raw results are in `artifacts/validation/final_native_acceptance.json` and
+`native_cache_ab_{reference_before,candidate,reference_after}.json` locally.
 
 The compatibility arithmetic is deliberate: explicit SDPA masks, FP32 time
 embeddings, original BF16 VAE RMS normalization, TF32 disabled, cuDNN SDPA
