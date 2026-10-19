@@ -106,11 +106,15 @@ not catch the corrector rounding difference.
 
 An earlier native FA3 experiment failed full-trajectory tolerance (second
 initial input max-abs 0.14824, RMSE 0.02445), before the final UniPC rounding
-fix; that historical failure must be retested at the current revision. The production pipeline rejects FA3 and compilation.
+fix; that historical failure must be retested at the current revision. The production defaults reject FA3 and compilation unless the explicit
+`pwm_experimental_backend` model option is enabled for validation.
 Quantization, LoRA, generic diffusion caches, step batching, TP/CP, offload,
 sleep mode, autoregression and state/action conditioning are unsupported and
 rejected. The standalone `validate_native.py` retains backend/compile options
 for numerical investigations; those options do not imply production support.
+FA3 has a fullgraph-compatible custom op and request-local cumulative sequence
+metadata. Compiled UND reuse is covered by Hopper layer-level tests; complete
+trajectory and deployment acceptance remains a separate requirement.
 
 ## Independent reference tools
 
@@ -140,3 +144,16 @@ engine's production configuration guard for investigation only. These results
 are not an end-to-end vLLM deployment acceptance; final measurements must use
 `--mode engine --native`. Different attention implementations are permitted in
 a performance comparison, but numerical tolerances and workload remain fixed.
+
+The 2026-10-20 corrected shared-GPU A/B/A showed the existing SDPA native
+configuration was slower: two inputs had p50 6.63/7.32 seconds versus
+4.60/4.63 for Cosmos FA3+compile. One SDPA candidate trajectory also failed
+the numerical tolerance against this optimized reference. The earlier eager
+SDPA speedup is therefore not a deployment win. Raw corrected measurements:
+`artifacts/validation/optimized_baseline_1020_{reference,sdpa_candidate,after_reference}.json`.
+
+For experimental native FA3+compile engine measurements, add
+`--experimental-native-backend --attention-backend flash3 --compile` to
+`validate.py --mode engine --native`. `--native-und-cache` tests compiled
+request-local UND reuse. Keep these opt-in until full-trajectory validation and
+the optimized-reference performance checks pass.

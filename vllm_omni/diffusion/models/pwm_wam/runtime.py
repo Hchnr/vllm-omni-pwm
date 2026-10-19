@@ -42,6 +42,7 @@ class PwmWamRuntime(nn.Module):
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
         torch.backends.cuda.enable_cudnn_sdp(True)
+        self.attention_backend = attention_backend
         self.cache_und = cache_und
         self.device = device
         config = json.loads((checkpoint / "config.json").read_text())["model"]["config"]
@@ -140,7 +141,13 @@ class PwmWamRuntime(nn.Module):
             action_ropes = tuple(rotary(p, dtype=torch.bfloat16, action=True) for p in positions)
             # Per-request, per-CFG-branch ownership; never reused across calls.
             cache = [[] for _ in self.transformer.language_model.model.layers] if self.cache_und else None
-            branches.append((ids, ropes, action_ropes, cache))
+            attention_metadata = None
+            if self.attention_backend == "flash3":
+                lengths = (len(ids), grid[0] * grid[1] * grid[2], request.action_length)
+                attention_metadata = tuple(
+                    torch.tensor([0, n], dtype=torch.int32, device=self.device) for n in (*lengths, sum(lengths))
+                )
+            branches.append((ids, ropes, action_ropes, cache, attention_metadata))
         scheduler = FlowUniPCMultistepScheduler(
             num_train_timesteps=1000,
             shift=1.0,
@@ -153,7 +160,7 @@ class PwmWamRuntime(nn.Module):
         for timestep in scheduler.timesteps:
 
             def velocity(branch):
-                ids, rope, action_rope, cache = branch
+                ids, rope, action_rope, cache, attention_metadata = branch
                 streams = self.transformer.encode_inputs(
                     ids,
                     latent[:video_size].reshape(video.shape),
@@ -163,7 +170,7 @@ class PwmWamRuntime(nn.Module):
                     video_indices,
                     action_indices,
                 )
-                hidden = self.transformer.forward_hidden(streams, rope, action_rope, cache)
+                hidden = self.transformer.forward_hidden(streams, rope, action_rope, cache, attention_metadata)
                 vv, va = self.transformer.decode_outputs(hidden, tuple(video.shape), projection, video_indices)
                 return torch.cat((vv.flatten(), va.flatten()))
 

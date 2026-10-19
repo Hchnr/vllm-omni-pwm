@@ -41,6 +41,8 @@ def test_flash3_fullgraph_matches_direct_kernel(causal):
     compiled = torch.compile(attention, fullgraph=True, dynamic=False)
     actual = compiled(q, k, v, causal=causal, backend="flash3")
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    reused = compiled(q, k, v, causal=causal, backend="flash3", metadata=(cu, cu))
+    torch.testing.assert_close(reused, expected, rtol=0, atol=0)
 
 
 @torch.inference_mode()
@@ -72,6 +74,7 @@ def test_compiled_und_cache_is_request_local():
         )
         for n in (17, 32, 8)
     )
+    metadata = tuple(torch.tensor([0, n], dtype=torch.int32, device="cuda") for n in (17, 32, 8, 57))
     for _ in range(2):
         cache = []
         text = torch.randn(17, 256, device="cuda", dtype=torch.bfloat16)
@@ -82,7 +85,7 @@ def test_compiled_und_cache_is_request_local():
                 torch.randn(8, 128, device="cuda", dtype=torch.bfloat16),
             )
             expected = compiled(streams, rope, rope)
-            actual = compiled(streams, rope, rope, cache)
+            actual = compiled(streams, rope, rope, cache, metadata)
             for a, b in zip(expected, actual):
                 torch.testing.assert_close(a, b, rtol=0, atol=0)
             assert len(cache) == 1

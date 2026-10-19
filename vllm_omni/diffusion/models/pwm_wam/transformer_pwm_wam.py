@@ -40,12 +40,10 @@ def rotate(x: Tensor, rope: Rope) -> Tensor:
 
 
 @torch.library.custom_op("vllm_omni::pwm_fa3_attention", mutates_args=())
-def pwm_fa3_attention(q: Tensor, k: Tensor, v: Tensor, causal: bool) -> Tensor:
+def pwm_fa3_attention(q: Tensor, k: Tensor, v: Tensor, cu_q: Tensor, cu_k: Tensor, causal: bool) -> Tensor:
     """Keep the inference-only FA3 call opaque to Inductor with known metadata."""
     from vllm.vllm_flash_attn import flash_attn_varlen_func
 
-    cu_q = torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device)
-    cu_k = torch.tensor([0, k.shape[0]], dtype=torch.int32, device=k.device)
     return flash_attn_varlen_func(
         q=q.contiguous(),
         k=k.contiguous(),
@@ -62,13 +60,26 @@ def pwm_fa3_attention(q: Tensor, k: Tensor, v: Tensor, causal: bool) -> Tensor:
 
 
 @pwm_fa3_attention.register_fake
-def _pwm_fa3_attention_fake(q: Tensor, k: Tensor, v: Tensor, causal: bool) -> Tensor:
+def _pwm_fa3_attention_fake(q: Tensor, k: Tensor, v: Tensor, cu_q: Tensor, cu_k: Tensor, causal: bool) -> Tensor:
     return torch.empty(q.shape, dtype=q.dtype, device=q.device)
 
 
-def attention(q: Tensor, k: Tensor, v: Tensor, *, causal: bool = False, backend: str = "sdpa") -> Tensor:
+def attention(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    *,
+    causal: bool = False,
+    backend: str = "sdpa",
+    metadata: tuple[Tensor, Tensor] | None = None,
+) -> Tensor:
     if backend == "flash3":
-        return pwm_fa3_attention(q, k, v, causal).flatten(1)
+        if metadata is None:
+            metadata = (
+                torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device),
+                torch.tensor([0, k.shape[0]], dtype=torch.int32, device=k.device),
+            )
+        return pwm_fa3_attention(q, k, v, *metadata, causal).flatten(1)
     if backend != "sdpa":
         raise ValueError(f"Unsupported native PWM attention backend: {backend}")
     mask = torch.ones((q.shape[0], k.shape[0]), dtype=torch.bool, device=q.device)
@@ -157,6 +168,7 @@ class PwmThreeTowerLayer(nn.Module):
         rope: tuple[Rope, Rope, Rope],
         action_rope: tuple[Rope, Rope, Rope],
         und_cache: list[tuple[Tensor, Tensor, Tensor]] | None = None,
+        attention_metadata: tuple[Tensor, Tensor, Tensor, Tensor] | None = None,
     ) -> Streams:
         und, video, action = streams
         attn, act = self.self_attn, self.action_block_moe_gen_action
@@ -168,19 +180,29 @@ class PwmThreeTowerLayer(nn.Module):
         qv, kv, vv = attn.project(self.input_layernorm_moe_gen(video), "_moe_gen")
         qa, ka, va = act.project(act.input_layernorm(action))
         keys, values = (ku, kv, ka), (vu, vv, va)
+        cu = attention_metadata
         if not cached:
-            yu = attention(rotate(qu, rope[0]), rotate(ku, rope[0]), vu, causal=True, backend=self.attention_backend)
+            yu = attention(
+                rotate(qu, rope[0]),
+                rotate(ku, rope[0]),
+                vu,
+                causal=True,
+                backend=self.attention_backend,
+                metadata=None if cu is None else (cu[0], cu[0]),
+            )
         yv = attention(
             rotate(qv, rope[1]),
             torch.cat([rotate(k, r) for k, r in zip(keys, rope)]),
             torch.cat(values),
             backend=self.attention_backend,
+            metadata=None if cu is None else (cu[1], cu[3]),
         )
         ya = attention(
             rotate(qa, action_rope[2]),
             torch.cat([rotate(k, r) for k, r in zip(keys, action_rope)]),
             torch.cat(values),
             backend=self.attention_backend,
+            metadata=None if cu is None else (cu[2], cu[3]),
         )
         action = action + act.o_proj(ya)
         action = action + act.mlp(act.post_attention_layernorm(action))
@@ -356,8 +378,11 @@ class PwmWamTransformer(nn.Module):
         rope: tuple[Rope, Rope, Rope],
         action_rope: tuple[Rope, Rope, Rope],
         und_cache: list[list[tuple[Tensor, Tensor, Tensor]]] | None = None,
+        attention_metadata: tuple[Tensor, Tensor, Tensor, Tensor] | None = None,
     ) -> Streams:
         for index, layer in enumerate(self.language_model.model.layers):
-            streams = layer(streams, rope, action_rope, None if und_cache is None else und_cache[index])
+            streams = layer(
+                streams, rope, action_rope, None if und_cache is None else und_cache[index], attention_metadata
+            )
         stack = self.language_model.model
         return stack.norm(streams[0]), stack.norm_moe_gen(streams[1]), stack.norm_moe_gen_action(streams[2])
