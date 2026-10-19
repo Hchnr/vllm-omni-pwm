@@ -56,6 +56,7 @@ def attention(q: Tensor, k: Tensor, v: Tensor, *, causal: bool = False, backend:
             causal=causal,
             softmax_scale=q.shape[-1] ** -0.5,
             fa_version=3,
+            num_splits=1,
         )
         return result.flatten(1)
     if backend != "sdpa":

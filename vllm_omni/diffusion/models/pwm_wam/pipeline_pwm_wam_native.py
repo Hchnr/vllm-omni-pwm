@@ -19,11 +19,16 @@ class PwmWamNativePipeline(nn.Module):
     _dit_modules = ["runtime.transformer"]
     _vae_modules = ["runtime.vae"]
     _encoder_modules = []
+    _resident_modules = []
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__()
         if od_config.parallel_config.world_size != 1:
             raise ValueError("Native PWM currently supports one GPU per worker")
+        if od_config.step_execution or od_config.max_num_seqs != 1:
+            raise ValueError("Native PWM requires request execution with max_num_seqs=1")
+        if not od_config.enforce_eager:
+            raise ValueError("Set enforce_eager=True; use pwm_compile for validated transformer-only compilation")
         if (
             od_config.enable_sleep_mode
             or od_config.enable_cpu_offload
@@ -37,6 +42,10 @@ class PwmWamNativePipeline(nn.Module):
         if od_config.cache_backend not in (None, "none"):
             raise ValueError("Native PWM does not support generic diffusion caches")
         config = od_config.model_config
+        if config.get("pwm_precision", "bfloat16") != "bfloat16":
+            raise ValueError("Native PWM currently supports BF16 only")
+        if config.get("pwm_reuse_und") or config.get("pwm_projected_und"):
+            raise ValueError("Native PWM UND cache is not yet implemented")
         self.runtime = PwmWamRuntime(
             Path(od_config.model),
             vae_path=config["pwm_vae_path"],

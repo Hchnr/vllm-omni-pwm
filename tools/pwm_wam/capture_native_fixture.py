@@ -59,9 +59,15 @@ def create(*args, **kwargs):
     }
     (output / "dtypes.json").write_text(json.dumps(metadata, indent=2) + "\n")
     seen = set()
+    network_count = 0
 
     def hook(name):
         def capture(module, inputs, kwargs, result):
+            nonlocal network_count
+            if name == "network" and os.environ.get("PWM_CAPTURE_ALL_NETWORK") == "1":
+                save_tree(f"network_{network_count:02d}", {"inputs": inputs, "kwargs": kwargs, "output": result})
+                network_count += 1
+                return
             if name not in seen:
                 seen.add(name)
                 save_tree(name, {"inputs": inputs, "kwargs": kwargs, "output": result})

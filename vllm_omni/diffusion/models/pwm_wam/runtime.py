@@ -35,6 +35,12 @@ class PwmWamRuntime(nn.Module):
         super().__init__()
         if attention_backend not in ("sdpa", "flash3"):
             raise ValueError("Native PWM supports sdpa or flash3")
+        # Match the reference runtime's precision contract. vLLM's CUDA
+        # platform disables cuDNN SDPA globally; restore this backend before
+        # execution in this dedicated model worker.
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.enable_cudnn_sdp(True)
         self.device = device
         config = json.loads((checkpoint / "config.json").read_text())["model"]["config"]
         self.spec = config["action128_spec"]
@@ -66,11 +72,12 @@ class PwmWamRuntime(nn.Module):
             raise ValueError("Non-finite Action128 transforms")
         if (normalizer.scale[normalizer.normalization_mask] <= 0).any():
             raise ValueError("Action128 normalization scale must be positive")
-        self.vae = (
-            AutoencoderKLWan.from_pretrained(vae_path, torch_dtype=torch.bfloat16, local_files_only=True)
-            .to(device)
-            .eval()
+        vae, loading_info = AutoencoderKLWan.from_pretrained(
+            vae_path, torch_dtype=torch.bfloat16, local_files_only=True, output_loading_info=True
         )
+        if any(loading_info.get(key) for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs")):
+            raise ValueError(f"Incomplete PWM VAE checkpoint: {loading_info}")
+        self.vae = vae.to(device).eval()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
         preserve_checkpoint_rms(self.vae)
         self.eval()
@@ -204,5 +211,7 @@ class PwmWamRuntime(nn.Module):
         if request.return_video:
             mean, inverse = self.vae_scale()
             decoded = self.vae.decode((video[None].to(torch.bfloat16) / inverse) + mean, return_dict=False)[0]
-            frames = (((decoded[0].permute(1, 2, 3, 0) + 1) / 2).clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+            frames = (
+                (((decoded[0].float().permute(1, 2, 3, 0) + 1) / 2).clamp(0, 1) * 255).to(torch.uint8).cpu().numpy()
+            )
         return result, frames, request.video_fps

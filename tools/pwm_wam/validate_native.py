@@ -20,6 +20,7 @@ parser.add_argument("--output", type=Path, required=True)
 parser.add_argument("--steps", type=int, default=5)
 parser.add_argument("--attention-backend", choices=("sdpa", "flash3"), default="sdpa")
 parser.add_argument("--compile", action="store_true")
+parser.add_argument("--trace", type=Path)
 args = parser.parse_args()
 started = time.perf_counter()
 model = PwmWamRuntime(
@@ -30,6 +31,37 @@ model = PwmWamRuntime(
     compile_layers=args.compile,
 )
 result = {"startup_seconds": time.perf_counter() - started, "runs": []}
+if args.trace:
+    from safetensors.torch import save_file
+
+    args.trace.mkdir(parents=True, exist_ok=True)
+    original_encode = model.transformer.encode_inputs
+    original_decode = model.transformer.decode_outputs
+    captured = {}
+    trace_index = 0
+
+    def encode(*values, **kwargs):
+        streams = original_encode(*values, **kwargs)
+        for name, value in zip(
+            ("text_ids", "video", "action", "timestep", "projection", "video_indices", "action_indices"), values
+        ):
+            captured["input." + name] = value.detach().cpu().contiguous()
+        for name, value in zip(("und", "video", "action"), streams):
+            captured["embedding." + name] = value.detach().cpu().contiguous()
+        return streams
+
+    def decode(*values, **kwargs):
+        global trace_index
+        outputs = original_decode(*values, **kwargs)
+        for name, value in zip(("video", "action"), outputs):
+            captured["velocity." + name] = value.detach().cpu().contiguous()
+        save_file(captured, str(args.trace / f"network_{trace_index:02d}.safetensors"))
+        captured.clear()
+        trace_index += 1
+        return outputs
+
+    model.transformer.encode_inputs = encode
+    model.transformer.decode_outputs = decode
 print("Native model ready", flush=True)
 for i, path in enumerate(args.input):
     raw = json.loads(path.read_text())
