@@ -42,10 +42,11 @@ class PwmWamNativePipeline(nn.Module):
         if od_config.cache_backend not in (None, "none"):
             raise ValueError("Native PWM does not support generic diffusion caches")
         config = od_config.model_config
-        if config.get("pwm_attention_backend", "sdpa") != "sdpa":
-            raise ValueError("Native PWM currently accepts SDPA only; FA3 failed full-trajectory parity")
-        if config.get("pwm_compile", False):
-            raise ValueError("Native PWM compilation has not passed eager-reference acceptance")
+        experimental = config.get("pwm_experimental_backend", False)
+        if not experimental and config.get("pwm_attention_backend", "sdpa") != "sdpa":
+            raise ValueError("Native PWM defaults to SDPA only; FA3 requires pwm_experimental_backend")
+        if not experimental and config.get("pwm_compile", False):
+            raise ValueError("Native PWM compilation requires pwm_experimental_backend")
         if od_config.dtype != bfloat16 or config.get("pwm_precision", "bfloat16") != "bfloat16":
             raise ValueError("Native PWM currently supports BF16 only")
         if config.get("pwm_reuse_und") or config.get("pwm_projected_und"):

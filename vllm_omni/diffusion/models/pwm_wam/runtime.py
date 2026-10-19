@@ -42,8 +42,6 @@ class PwmWamRuntime(nn.Module):
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
         torch.backends.cuda.enable_cudnn_sdp(True)
-        if cache_und and compile_layers:
-            raise ValueError("Native UND cache with compile is not validated")
         self.cache_und = cache_und
         self.device = device
         config = json.loads((checkpoint / "config.json").read_text())["model"]["config"]

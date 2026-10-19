@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--reference-config", type=Path)
     parser.add_argument("--native", action="store_true")
     parser.add_argument("--native-und-cache", action="store_true")
+    parser.add_argument("--experimental-native-backend", action="store_true")
     parser.add_argument("--vae", type=Path)
     parser.add_argument("--tokenizer", type=Path)
     parser.add_argument("--attention-backend", choices=("flash3", "sdpa"), default="sdpa")
@@ -47,6 +48,8 @@ def main():
         parser.error("Native validation requires BF16; use --native-und-cache for native caching")
     if args.native_und_cache and not args.native:
         parser.error("--native-und-cache requires --native")
+    if args.experimental_native_backend and not args.native:
+        parser.error("--experimental-native-backend requires --native")
     if args.mode == "runtime" and not args.native:
         parser.error("Experimental runtime mode requires --native")
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +174,7 @@ def main():
                     "pwm_python": str(args.python),
                     "pwm_cosmos_root": str(args.cosmos_root),
                     "pwm_compile": args.compile,
+                    "pwm_experimental_backend": args.experimental_native_backend,
                     "pwm_native_und_cache": args.native_und_cache,
                     "pwm_reuse_und": args.reuse_und,
                     "pwm_projected_und": args.projected_und,

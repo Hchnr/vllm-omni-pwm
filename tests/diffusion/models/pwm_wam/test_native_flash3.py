@@ -41,3 +41,48 @@ def test_flash3_fullgraph_matches_direct_kernel(causal):
     compiled = torch.compile(attention, fullgraph=True, dynamic=False)
     actual = compiled(q, k, v, causal=causal, backend="flash3")
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_compiled_und_cache_is_request_local():
+    if os.environ.get("PWM_FA3_TEST") != "1":
+        pytest.skip("Set PWM_FA3_TEST=1 on Hopper to test bundled FA3")
+    from vllm_omni.diffusion.models.pwm_wam.transformer_pwm_wam import PwmThreeTowerLayer
+
+    torch.manual_seed(1020)
+    layer = (
+        PwmThreeTowerLayer(
+            width=256,
+            intermediate=384,
+            action_width=128,
+            action_intermediate=256,
+            heads=4,
+            kv_heads=2,
+            dim=128,
+        )
+        .to(device="cuda", dtype=torch.bfloat16)
+        .eval()
+    )
+    layer.attention_backend = "flash3"
+    compiled = torch.compile(layer, fullgraph=True, dynamic=False)
+    rope = tuple(
+        (
+            torch.ones(n, 128, device="cuda", dtype=torch.bfloat16),
+            torch.zeros(n, 128, device="cuda", dtype=torch.bfloat16),
+        )
+        for n in (17, 32, 8)
+    )
+    for _ in range(2):
+        cache = []
+        text = torch.randn(17, 256, device="cuda", dtype=torch.bfloat16)
+        for _ in range(3):
+            streams = (
+                text,
+                torch.randn(32, 256, device="cuda", dtype=torch.bfloat16),
+                torch.randn(8, 128, device="cuda", dtype=torch.bfloat16),
+            )
+            expected = compiled(streams, rope, rope)
+            actual = compiled(streams, rope, rope, cache)
+            for a, b in zip(expected, actual):
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
+            assert len(cache) == 1
