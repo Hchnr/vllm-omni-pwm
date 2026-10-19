@@ -1,0 +1,17 @@
+{
+  "torch": "2.10.0+cu130",
+  "source_sha256": "03aef1959f273b704ca4954f69b2a34df0fdd412f6acc8ab91625eeed78cf4fe",
+  "seed": 123,
+  "shape": [
+    1,
+    128
+  ],
+  "steps": [
+    5,
+    10,
+    35
+  ],
+  "shift": 5,
+  "velocity": "NumPy RandomState float32 normal, converted to CUDA BF16; state FP32",
+  "purpose": "Frozen independent old-runtime trajectory; catches cross-PyTorch 2x2 solve rounding not covered by same-environment source comparison"
+}
