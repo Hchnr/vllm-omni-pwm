@@ -79,6 +79,23 @@ def compare(reference, actual):
     }
 
 
+def optimized_reference(result):
+    """Qualify the existing Cosmos deployment, independently of numerical parity.
+
+    Worker mode always enables request-local metadata reuse and leaves CUDA
+    Graph/QKV fusion off. Keep the exact workload checks in main as well.
+    """
+    args = result.get("args", {})
+    return (
+        args.get("mode") == "worker"
+        and args.get("attention_backend") == "flash3"
+        and args.get("compile") is True
+        and args.get("precision") == "bfloat16"
+        and not args.get("reuse_und", False)
+        and not args.get("projected_und", False)
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("reference", type=Path)
@@ -90,7 +107,7 @@ def main():
     result = compare(reference, candidate)
     result["reference"] = str(args.reference)
     result["candidate"] = str(args.candidate)
-    keys = ("precision", "attention_backend", "steps", "warmup", "repeats", "input")
+    keys = ("precision", "steps", "warmup", "repeats", "input")
     ra, ca = reference.get("args", {}), candidate.get("args", {})
     comparable = all(key in ra and ra[key] == ca.get(key) for key in keys)
     comparable = comparable and ra.get("warmup", 0) >= 2 and ra.get("repeats", 0) >= 3
@@ -99,6 +116,9 @@ def main():
     for key in ("input_sha256", "input_asset_sha256"):
         comparable = comparable and key in reference and reference[key] == candidate.get(key)
     result["timing_comparable"] = comparable
+    result["reference_is_optimized_deployment"] = optimized_reference(reference)
+    result["backend_pair"] = [ra.get("attention_backend"), ca.get("attention_backend")]
+    result["deployment_speedup_eligible"] = comparable and optimized_reference(reference) and result["passed"]
     result["timing_caveat"] = (
         "Matching configuration does not establish GPU exclusivity. Inspect gpu_processes_before/after; "
         "co-tenant activity invalidates an exclusive-hardware performance claim."

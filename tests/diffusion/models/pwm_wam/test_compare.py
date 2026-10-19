@@ -64,3 +64,23 @@ def test_missing_request_rejected():
     expected["runs"].append({**expected["runs"][0], "request_index": 1})
     with pytest.raises(ValueError, match="Missing"):
         comparison.compare(expected, sample())
+
+
+def test_eager_reference_cannot_qualify_deployment_performance():
+    result = {"args": {"mode": "worker", "attention_backend": "sdpa", "compile": False, "precision": "bfloat16"}}
+    assert not comparison.optimized_reference(result)
+
+
+def test_optimized_reference_requires_compile_and_original_cache_policy():
+    args = {
+        "mode": "worker",
+        "attention_backend": "flash3",
+        "compile": True,
+        "precision": "bfloat16",
+        "reuse_und": False,
+        "projected_und": False,
+    }
+    assert comparison.optimized_reference({"args": args})
+    assert not comparison.optimized_reference({"args": {**args, "compile": False}})
+    assert not comparison.optimized_reference({"args": {**args, "reuse_und": True}})
+    assert not comparison.optimized_reference({"args": {**args, "mode": "engine"}})
