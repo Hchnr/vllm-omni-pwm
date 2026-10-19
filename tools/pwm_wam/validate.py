@@ -223,6 +223,7 @@ def main():
             loop.close()
 
     result["startup_seconds"] = time.perf_counter() - started
+    print(f"Model ready after {result['startup_seconds']:.3f}s", flush=True)
     try:
         if args.check_invalid_request:
             if args.mode != "engine":
@@ -244,6 +245,8 @@ def main():
                 started = time.perf_counter()
                 output = run(request, repetition * len(requests) + index)
                 elapsed = time.perf_counter() - started
+                phase = "warmup" if repetition < args.warmup else "measure"
+                print(f"{phase} repetition={repetition} request={index} seconds={elapsed:.6f}", flush=True)
                 if repetition >= args.warmup:
                     result["runs"].append({"request_index": index, "seconds": elapsed, "output": output})
                     args.output.write_text(json.dumps(result, indent=2) + "\n")
