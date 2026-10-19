@@ -18,7 +18,18 @@ from pathlib import Path
 
 
 class NativeService:
-    def __init__(self, checkpoint, vae, tokenizer, output_dir, attention_backend="sdpa", cache_und=False):
+    def __init__(
+        self,
+        checkpoint,
+        vae,
+        tokenizer,
+        output_dir,
+        attention_backend="sdpa",
+        cache_und=False,
+        *,
+        compile_layers=False,
+        experimental_backend=False,
+    ):
         from vllm_omni.diffusion.data import OmniDiffusionConfig
         from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
 
@@ -34,7 +45,8 @@ class NativeService:
             "attention_backend": attention_backend,
             "contract_sha256": hashlib.sha256(json.dumps(self.spec, sort_keys=True).encode()).hexdigest(),
             "precision": "bfloat16",
-            "compile": False,
+            "compile": compile_layers,
+            "experimental_backend": experimental_backend,
             "native_und_cache": cache_und,
             "world_size": 1,
             "max_concurrent_requests": 1,
@@ -50,6 +62,8 @@ class NativeService:
                     "pwm_tokenizer_path": str(tokenizer),
                     "pwm_attention_backend": attention_backend,
                     "pwm_native_und_cache": cache_und,
+                    "pwm_compile": compile_layers,
+                    "pwm_experimental_backend": experimental_backend,
                 },
             )
         )
@@ -174,14 +188,25 @@ def main():
     parser.add_argument("--vae", type=Path, required=True)
     parser.add_argument("--tokenizer", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--attention-backend", choices=("sdpa",), default="sdpa")
+    parser.add_argument("--attention-backend", choices=("sdpa", "flash3"), default="sdpa")
+    parser.add_argument("--compile", action="store_true", help="Compile each transformer layer")
+    parser.add_argument("--experimental-backend", action="store_true")
     parser.add_argument("--warmup-input", type=Path)
     parser.add_argument("--cache-und", action="store_true", help="Enable request-local UND reuse")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8019)
     args = parser.parse_args()
+    if (args.compile or args.attention_backend != "sdpa") and not args.experimental_backend:
+        parser.error("FA3/compile require --experimental-backend until deployment validation is complete")
     service = NativeService(
-        args.checkpoint, args.vae, args.tokenizer, args.output_dir, args.attention_backend, args.cache_und
+        args.checkpoint,
+        args.vae,
+        args.tokenizer,
+        args.output_dir,
+        args.attention_backend,
+        args.cache_und,
+        compile_layers=args.compile,
+        experimental_backend=args.experimental_backend,
     )
     try:
         if args.warmup_input:
