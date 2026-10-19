@@ -137,7 +137,9 @@ class PwmWamRuntime(nn.Module):
             ropes = tuple(rotary(p, dtype=torch.bfloat16) for p in positions)
             action_ropes = tuple(rotary(p, dtype=torch.bfloat16, action=True) for p in positions)
             branches.append((ids, ropes, action_ropes))
-        scheduler = FlowUniPCMultistepScheduler(num_train_timesteps=1000, shift=1.0, use_dynamic_shifting=False)
+        scheduler = FlowUniPCMultistepScheduler(
+            num_train_timesteps=1000, shift=1.0, use_dynamic_shifting=False, use_cpu_coefficients=True
+        )
         scheduler.set_timesteps(request.steps, device=self.device, shift=request.shift)
         generator = torch.Generator(device=self.device).manual_seed(request.seed)
         for timestep in scheduler.timesteps:
