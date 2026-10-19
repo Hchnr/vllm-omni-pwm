@@ -46,6 +46,11 @@ class PwmWamPipeline(nn.Module):
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__()
+        if od_config.parallel_config.world_size != 1:
+            raise ValueError("PWM compatibility runtime supports world_size=1 only")
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if not visible or len(visible.split(",")) != 1:
+            raise ValueError("Set CUDA_VISIBLE_DEVICES to exactly one GPU for PWM")
         config = od_config.model_config
         python = Path(config["pwm_python"]).resolve()
         cosmos_root = Path(config["pwm_cosmos_root"]).resolve()
@@ -69,8 +74,9 @@ class PwmWamPipeline(nn.Module):
         env.update(PYTHONPATH=str(cosmos_root), COSMOS_TRAINING="0", LD_LIBRARY_PATH="", OMP_NUM_THREADS="1")
         self._timeout = float(config.get("pwm_timeout", 1800))
         self._lock = threading.Lock()
-        self._process = subprocess.Popen(command, cwd=cosmos_root, env=env, stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE, text=True, bufsize=1)
+        self._process = subprocess.Popen(
+            command, cwd=cosmos_root, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1
+        )
         self._finalizer = weakref.finalize(self, _stop_worker, self._process)
         try:
             ready = self._receive()
@@ -115,4 +121,6 @@ class PwmWamPipeline(nn.Module):
             response = self._receive()
         if "error" in response:
             raise ValueError(response["error"])
-        return DiffusionOutput(output={"payload": response["result"]})
+        result = response["result"]
+        actions = result.pop("action")
+        return DiffusionOutput(output={"payload": {"actions": actions}, "metadata": {"actions": result}})

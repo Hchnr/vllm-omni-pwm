@@ -32,19 +32,24 @@ def main():
     os.environ["COSMOS_TRAINING"] = "0"
 
     import torch
-    from omegaconf import OmegaConf
-
-    from cosmos_framework.inference.action_server import initialize_single_rank_distributed
     from cosmos_framework.inference.action_serving import prepare_wam_request
     from cosmos_framework.inference.args import OmniSampleOverrides, OmniSetupOverrides
     from cosmos_framework.inference.inference import OmniInference
     from cosmos_framework.utils import misc
+    from omegaconf import OmegaConf
 
     def emit(message):
         protocol.write(json.dumps(message, allow_nan=False) + "\n")
         protocol.flush()
 
-    initialize_single_rank_distributed()
+    # Never inherit the parent engine / torchrun rendezvous. Port zero reserves
+    # an ephemeral listener atomically, allowing independent workers to coexist.
+    for key in tuple(os.environ):
+        if key.startswith("TORCHELASTIC_") or key in ("MASTER_ADDR", "MASTER_PORT", "GROUP_RANK", "ROLE_RANK"):
+            os.environ.pop(key, None)
+    os.environ.update(RANK="0", WORLD_SIZE="1", LOCAL_RANK="0", LOCAL_WORLD_SIZE="1")
+    store = torch.distributed.TCPStore("127.0.0.1", 0, 1, True)
+    torch.distributed.init_process_group("nccl", store=store, rank=0, world_size=1)
     with tempfile.TemporaryDirectory(prefix="pwm-wam-") as scratch:
         setup = OmniSetupOverrides(
             checkpoint_path=str(args.checkpoint),
@@ -114,18 +119,24 @@ def main():
                             physical = physical.masked_fill(~mask, 0).cpu()
                             if not torch.isfinite(normalized).all() or not torch.isfinite(physical).all():
                                 raise RuntimeError("Non-finite Action128 output")
-                        emit({"result": {
-                            "action": physical.tolist(),
-                            "normalized_action": normalized.tolist(),
-                            "action_domain": prepared.action_domain,
-                            "action_dim_mask": prepared.action_dim_mask,
-                            "action_fps": prepared.action_fps,
-                            "action_timestamps_seconds": batch["sequence_plan"][0].action_timestamps_seconds,
-                            "action_units": "raw_physical_or_source_units",
-                            "seed": prepared.seed,
-                            "conditioning_caption_sha256": hashlib.sha256(batch["ai_caption"][0].encode()).hexdigest(),
-                            "elapsed_seconds": time.perf_counter() - started,
-                        }})
+                        emit(
+                            {
+                                "result": {
+                                    "action": physical.tolist(),
+                                    "normalized_action": normalized.tolist(),
+                                    "action_domain": prepared.action_domain,
+                                    "action_dim_mask": prepared.action_dim_mask,
+                                    "action_fps": prepared.action_fps,
+                                    "action_timestamps_seconds": batch["sequence_plan"][0].action_timestamps_seconds,
+                                    "action_units": "raw_physical_or_source_units",
+                                    "seed": prepared.seed,
+                                    "conditioning_caption_sha256": hashlib.sha256(
+                                        batch["ai_caption"][0].encode()
+                                    ).hexdigest(),
+                                    "elapsed_seconds": time.perf_counter() - started,
+                                }
+                            }
+                        )
                 except (ValueError, TypeError, KeyError) as exc:
                     traceback.print_exc(file=sys.stderr)
                     emit({"error": str(exc), "error_type": "invalid_request"})

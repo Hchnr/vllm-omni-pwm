@@ -37,25 +37,45 @@ def main():
     requests = [json.loads(p.read_text()) for p in args.input]
     for request in requests:
         request["num_steps"] = args.steps
-    result = {"args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-              "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"), "runs": []}
+    result = {
+        "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "runs": [],
+    }
     result["args"]["input"] = [str(p) for p in args.input]
     started = time.perf_counter()
     if args.mode == "worker":
-        command = [str(args.python), "-u", str(Path(__file__).resolve().parents[2] /
-                   "vllm_omni/diffusion/models/pwm_wam/worker.py"), "--checkpoint", str(args.checkpoint),
-                   "--precision", args.precision, "--attention-backend", args.attention_backend]
+        command = [
+            str(args.python),
+            "-u",
+            str(Path(__file__).resolve().parents[2] / "vllm_omni/diffusion/models/pwm_wam/worker.py"),
+            "--checkpoint",
+            str(args.checkpoint),
+            "--precision",
+            args.precision,
+            "--attention-backend",
+            args.attention_backend,
+        ]
         if args.reference_config:
             command += ["--reference-config", str(args.reference_config)]
         if args.compile:
             command += ["--compile"]
         if args.reuse_und:
             command += ["--reuse-und"]
-        env = dict(os.environ, PYTHONPATH=str(args.cosmos_root), COSMOS_TRAINING="0", LD_LIBRARY_PATH="",
-                   OMP_NUM_THREADS="1")
+        env = dict(
+            os.environ, PYTHONPATH=str(args.cosmos_root), COSMOS_TRAINING="0", LD_LIBRARY_PATH="", OMP_NUM_THREADS="1"
+        )
         log = args.output.with_suffix(".log").open("w")
-        process = subprocess.Popen(command, env=env, cwd=args.cosmos_root, stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=log, text=True, bufsize=1)
+        process = subprocess.Popen(
+            command,
+            env=env,
+            cwd=args.cosmos_root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=log,
+            text=True,
+            bufsize=1,
+        )
         ready = json.loads(process.stdout.readline())
         assert ready["ready"], ready
         result["runtime"] = ready
@@ -78,25 +98,44 @@ def main():
         from vllm_omni.diffusion.request import OmniDiffusionRequest
         from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
-        engine = DiffusionEngine(OmniDiffusionConfig(
-            model=str(args.checkpoint), model_class_name="PwmWamPipeline", enforce_eager=True,
-            model_config={"pwm_python": str(args.python), "pwm_cosmos_root": str(args.cosmos_root),
-                          "pwm_compile": args.compile, "pwm_reuse_und": args.reuse_und,
-                          "pwm_precision": args.precision, "pwm_attention_backend": args.attention_backend},
-        ))
+        engine = DiffusionEngine(
+            OmniDiffusionConfig(
+                model=str(args.checkpoint),
+                model_class_name="PwmWamPipeline",
+                enforce_eager=True,
+                model_config={
+                    "pwm_python": str(args.python),
+                    "pwm_cosmos_root": str(args.cosmos_root),
+                    "pwm_compile": args.compile,
+                    "pwm_reuse_und": args.reuse_und,
+                    "pwm_precision": args.precision,
+                    "pwm_attention_backend": args.attention_backend,
+                },
+            )
+        )
         loop = asyncio.new_event_loop()
 
         def run(request, index):
-            params = OmniDiffusionSamplingParams(seed=request["seed"], num_inference_steps=request["num_steps"],
-                                                guidance_scale=request["guidance"],
-                                                extra_args={"pwm_request": request})
-            outputs = loop.run_until_complete(engine.step(OmniDiffusionRequest(
-                prompt=request["prompt"], sampling_params=params, request_id=f"pwm-{index}")))
-            return repr(outputs)
+            params = OmniDiffusionSamplingParams(
+                seed=request["seed"],
+                num_inference_steps=request["num_steps"],
+                guidance_scale=request["guidance"],
+                extra_args={"pwm_request": request},
+            )
+            outputs = loop.run_until_complete(
+                engine.step(
+                    OmniDiffusionRequest(prompt=request["prompt"], sampling_params=params, request_id=f"pwm-{index}")
+                )
+            )
+            if len(outputs) != 1:
+                raise RuntimeError(f"Expected one output, received {len(outputs)}")
+            mm = outputs[0].multimodal_output
+            return {"action": mm["actions"], **mm["metadata"]["actions"]}
 
         def close():
             engine.close()
             loop.close()
+
     result["startup_seconds"] = time.perf_counter() - started
     try:
         for repetition in range(args.warmup + args.repeats):
