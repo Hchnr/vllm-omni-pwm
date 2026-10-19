@@ -5,7 +5,7 @@
 from collections.abc import Iterable
 from pathlib import Path
 
-from torch import Tensor, nn
+from torch import Tensor, bfloat16, nn
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
@@ -46,10 +46,10 @@ class PwmWamNativePipeline(nn.Module):
             raise ValueError("Native PWM currently accepts SDPA only; FA3 failed full-trajectory parity")
         if config.get("pwm_compile", False):
             raise ValueError("Native PWM compilation has not passed eager-reference acceptance")
-        if config.get("pwm_precision", "bfloat16") != "bfloat16":
+        if od_config.dtype != bfloat16 or config.get("pwm_precision", "bfloat16") != "bfloat16":
             raise ValueError("Native PWM currently supports BF16 only")
         if config.get("pwm_reuse_und") or config.get("pwm_projected_und"):
-            raise ValueError("Native PWM UND cache is not yet implemented")
+            raise ValueError("Legacy UND cache flags are not supported; use pwm_native_und_cache")
         self.runtime = PwmWamRuntime(
             Path(od_config.model),
             vae_path=config["pwm_vae_path"],
