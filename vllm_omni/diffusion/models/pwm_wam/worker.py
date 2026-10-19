@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--reuse-und", action="store_true")
     parser.add_argument("--projected-und", action="store_true")
     args = parser.parse_args()
+    if args.projected_und and not args.reuse_und:
+        parser.error("--projected-und requires --reuse-und")
     if args.precision == "float32" and args.attention_backend != "sdpa":
         parser.error("float32 requires --attention-backend sdpa")
     # Keep stdout exclusively for protocol records, including during imports.

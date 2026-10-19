@@ -52,8 +52,14 @@ class PwmWamPipeline(nn.Module):
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         if not visible or len(visible.split(",")) != 1:
             raise ValueError("Set CUDA_VISIBLE_DEVICES to exactly one GPU for PWM")
+        if od_config.enable_sleep_mode or od_config.enable_cpu_offload:
+            raise ValueError("PWM worker owns device memory; Omni sleep/offload is unsupported")
+        if od_config.cache_backend not in (None, "none"):
+            raise ValueError("PWM does not support generic diffusion cache backends")
         config = od_config.model_config
-        python = Path(config["pwm_python"]).resolve()
+        # Preserve the venv symlink: resolving it selects the base interpreter
+        # and loses the worker environment's site-packages.
+        python = Path(config["pwm_python"]).absolute()
         cosmos_root = Path(config["pwm_cosmos_root"]).resolve()
         checkpoint = Path(od_config.model).resolve()
         if not python.is_file() or not (cosmos_root / "cosmos_framework").is_dir():
