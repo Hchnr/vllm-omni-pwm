@@ -8,6 +8,7 @@ Every measured call has a fresh request and seed; outputs are retained for parit
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import statistics
@@ -29,6 +30,7 @@ def main():
     parser.add_argument("--precision", choices=("bfloat16", "float32"), default="bfloat16")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--reuse-und", action="store_true")
+    parser.add_argument("--projected-und", action="store_true")
     parser.add_argument("--steps", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
@@ -43,6 +45,14 @@ def main():
         "runs": [],
     }
     result["args"]["input"] = [str(p) for p in args.input]
+    result["input_sha256"] = [hashlib.sha256(p.read_bytes()).hexdigest() for p in args.input]
+    result["fork_revision"] = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    result["cosmos_revision"] = subprocess.check_output(
+        ["git", "-C", str(args.cosmos_root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    result["gpu"] = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=index,uuid,name,driver_version", "--format=csv"], text=True
+    )
     started = time.perf_counter()
     if args.mode == "worker":
         command = [
@@ -62,6 +72,8 @@ def main():
             command += ["--compile"]
         if args.reuse_und:
             command += ["--reuse-und"]
+        if args.projected_und:
+            command += ["--projected-und"]
         env = dict(
             os.environ, PYTHONPATH=str(args.cosmos_root), COSMOS_TRAINING="0", LD_LIBRARY_PATH="", OMP_NUM_THREADS="1"
         )

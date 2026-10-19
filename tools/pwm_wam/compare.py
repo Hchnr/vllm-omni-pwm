@@ -44,6 +44,12 @@ def compare(reference, actual):
         ):
             if expected[field] != observed[field]:
                 raise ValueError(f"Request {run['request_index']}: {field} mismatch")
+        for output in (expected, observed):
+            for key in ("action", "normalized_action"):
+                if len(output[key]) != len(output["action_timestamps_seconds"]):
+                    raise ValueError("Action horizon differs from timestamps")
+                if any(len(row) != len(output["action_dim_mask"]) for row in output[key]):
+                    raise ValueError("Action width differs from slot mask")
         # Score only valid dimensions; padding zeros must not dilute RMSE.
         mask = expected["action_dim_mask"]
 

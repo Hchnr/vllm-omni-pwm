@@ -8,15 +8,16 @@ import select
 import subprocess
 import threading
 import weakref
+from collections.abc import Iterable
 from pathlib import Path
 
-from torch import nn
+from torch import Tensor, nn
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 
-def _stop_worker(process):
+def _stop_worker(process: subprocess.Popen[str]) -> None:
     if process.stdin is not None:
         process.stdin.close()
     try:
@@ -44,7 +45,7 @@ class PwmWamPipeline(nn.Module):
     _vae_modules = []
     _encoder_modules = []
 
-    def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
+    def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__()
         if od_config.parallel_config.world_size != 1:
             raise ValueError("PWM compatibility runtime supports world_size=1 only")
@@ -95,10 +96,17 @@ class PwmWamPipeline(nn.Module):
             raise RuntimeError(f"PWM worker exited (code {self._process.poll()}); inspect worker stderr")
         return json.loads(line)
 
-    def close(self):
+    def load_weights(self, weights: Iterable[tuple[str, Tensor]]) -> set[str]:
+        # The isolated worker completed strict HF loading before its ready reply.
+        # There are no parent-process parameters or duplicate weight sources.
+        if next(iter(weights), None) is not None:
+            raise ValueError("PWM weights must be loaded by the isolated worker")
+        return set()
+
+    def close(self) -> None:
         self._finalizer()
 
-    def forward(self, req: DiffusionRequestBatch, **kwargs):
+    def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
         if len(req.prompts) != 1:
             raise ValueError("PWM currently accepts exactly one request per forward")
         params = req.sampling_params

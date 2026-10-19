@@ -25,7 +25,10 @@ def main():
     parser.add_argument("--precision", choices=("bfloat16", "float32"), default="bfloat16")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--reuse-und", action="store_true")
+    parser.add_argument("--projected-und", action="store_true")
     args = parser.parse_args()
+    if args.precision == "float32" and args.attention_backend != "sdpa":
+        parser.error("float32 requires --attention-backend sdpa")
     # Keep stdout exclusively for protocol records, including during imports.
     protocol = os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1)
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
@@ -77,6 +80,10 @@ def main():
         model = OmniInference.create(setup).model.eval()
         if model.config.tower_structure != "three_tower" or not model.config.action_gen:
             raise ValueError("PWM runtime requires an Action128 three_tower checkpoint")
+        if args.projected_und:
+            from und_cache import install_projected_und_cache
+
+            install_projected_und_cache(model)
         spec = OmegaConf.to_container(model.config.action128_spec, resolve=True)
         normalizer = model.net.action_normalization
         normalizer.validate_contract()
