@@ -37,3 +37,22 @@ def test_native_three_tower_matches_reference():
             actual = actual_layer(streams, pack["_small_rope"], pack["_small_action_rope"])
             for key, tensor in zip(("causal_seq", "full_only_seq", "action_seq"), actual):
                 torch.testing.assert_close(tensor, expected[key], rtol=2e-5, atol=2e-6)
+
+
+def test_time_embedding_uses_fp32_with_bf16_stored_weights():
+    from cosmos_framework.model.generator.mot.modeling_utils import TimestepEmbedder
+
+    torch.manual_seed(1019)
+    expected = TimestepEmbedder(32).to(dtype=torch.bfloat16)
+    actual = native.PwmTimeEmbedding(32).to(dtype=torch.bfloat16)
+    actual.load_state_dict(expected.state_dict(), strict=True)
+    # CUDA reference autocasts its BF16 weights to FP32 for time embedding.
+    # This CPU check reproduces that arithmetic explicitly.
+    expected.float()
+    times = torch.tensor([0.0, 0.125, 1.0], dtype=torch.float32)
+    assert actual(times).dtype == torch.float32
+    # Module.to(bfloat16) also casts nonpersistent buffers; restore frequencies
+    # from CPU FP32 just as the production meta loader does.
+    actual.frequencies = native.PwmTimeEmbedding(32).frequencies
+    expected._timestep_frequencies = TimestepEmbedder(32)._timestep_frequencies
+    torch.testing.assert_close(actual(times), expected(times), rtol=0, atol=0)

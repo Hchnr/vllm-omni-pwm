@@ -40,11 +40,14 @@ def rotate(x: Tensor, rope: Rope) -> Tensor:
 
 
 def attention(q: Tensor, k: Tensor, v: Tensor, *, causal: bool = False) -> Tensor:
+    mask = torch.ones((q.shape[0], k.shape[0]), dtype=torch.bool, device=q.device)
+    if causal:
+        mask = mask.tril()
     result = F.scaled_dot_product_attention(
         q.transpose(0, 1)[None],
         k.transpose(0, 1)[None],
         v.transpose(0, 1)[None],
-        is_causal=causal,
+        attn_mask=mask[None, None],
         enable_gqa=True,
         scale=q.shape[-1] ** -0.5,
     )
@@ -157,9 +160,13 @@ class PwmTimeEmbedding(nn.Module):
         self.register_buffer("frequencies", frequencies, persistent=False)
 
     def forward(self, time: Tensor) -> Tensor:
-        phase = time[:, None] * self.frequencies.to(time.device)[None]
+        phase = time.float()[:, None] * self.frequencies.to(time.device)[None]
         encoded = torch.cat((phase.cos(), phase.sin()), dim=-1)
-        return self.mlp(encoded.to(self.mlp[0].weight.dtype))
+        # Reference uses CUDA FP32 autocast even with BF16 stored weights.
+        # Explicit casts preserve that contract across PyTorch environments.
+        first, last = self.mlp[0], self.mlp[2]
+        hidden = F.silu(F.linear(encoded, first.weight.float(), first.bias.float()))
+        return F.linear(hidden, last.weight.float(), last.bias.float())
 
 
 class PwmTextStack(nn.Module):
@@ -231,6 +238,61 @@ class PwmWamTransformer(nn.Module):
                     module = model.get_submodule(owner) if owner else model
                     setattr(module, leaf, nn.Parameter(value, requires_grad=False) if name in parameters else value)
         return model.eval()
+
+    def encode_inputs(
+        self,
+        text_ids: Tensor,
+        video_latents: Tensor,
+        actions: Tensor,
+        timestep: Tensor,
+        projection_ids: Tensor,
+        noisy_video_frames: Tensor,
+        noisy_action_frames: Tensor,
+    ) -> Streams:
+        """Embed one packed WAM sample, preserving the reference operation order.
+
+        Video layout is C,T,H,W; timestep is the sampler's unscaled scalar.
+        Caller supplies noisy indices explicitly so conditioning never gets a
+        timestep embedding. Projection IDs are not normalization-domain IDs.
+        """
+        channels, frames, height, width = video_latents.shape
+        if channels != 48 or actions.ndim != 2 or actions.shape[1] != 128:
+            raise ValueError("PWM requires 48-channel video latents and Action128")
+        if timestep.numel() != 1:
+            raise ValueError("Native WAM currently supports one timestep per request")
+        dtype = self.vae2llm.weight.dtype
+        padded = F.pad(video_latents, (0, width % 2, 0, height % 2))
+        hp, wp = (height + 1) // 2, (width + 1) // 2
+        patches = padded.reshape(channels, frames, hp, 2, wp, 2)
+        patches = patches.permute(1, 2, 4, 3, 5, 0).reshape(-1, 192)
+        video = self.vae2llm(patches.to(dtype))
+        scaled_time = timestep.reshape(1).float() * 0.001
+        video_time = self.time_embedder(scaled_time).to(dtype)
+        spatial = torch.arange(hp * wp, device=video.device)
+        noisy_tokens = (noisy_video_frames[:, None] * (hp * wp) + spatial).flatten()
+        video[noisy_tokens] = video[noisy_tokens] + video_time
+        action = self.action2llm(actions.to(dtype), projection_ids)
+        action = action + self.action_modality_embed[None]
+        action_time = self.action_time_embedder(scaled_time).to(dtype)
+        action[noisy_action_frames] = action[noisy_action_frames] + action_time
+        return self.language_model.model.embed_tokens(text_ids), video, action
+
+    def decode_outputs(
+        self,
+        streams: Streams,
+        video_shape: tuple[int, int, int, int],
+        projection_ids: Tensor,
+        noisy_video_frames: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Decode final normalized hidden states into video/action velocities."""
+        _, frames, height, width = video_shape
+        hp, wp = (height + 1) // 2, (width + 1) // 2
+        video = streams[1].reshape(frames, hp * wp, -1)[noisy_video_frames].flatten(0, 1)
+        patches = self.llm2vae(video).reshape(-1, hp, wp, 2, 2, 48)
+        decoded = patches.permute(5, 0, 1, 3, 2, 4).reshape(48, -1, hp * 2, wp * 2)
+        velocity = decoded.new_zeros(video_shape)
+        velocity[:, noisy_video_frames] = decoded[:, :, :height, :width]
+        return velocity, self.llm2action(streams[2], projection_ids)
 
     def forward_hidden(
         self, streams: Streams, rope: tuple[Rope, Rope, Rope], action_rope: tuple[Rope, Rope, Rope]
