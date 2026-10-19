@@ -13,13 +13,18 @@ upstream Cosmos3 kernels. It requires an installed Cosmos PWM environment via
 weight mapping. The artifact consists of `config.json`, a safetensors index and
 shards exported by Cosmos `scripts.export_model --no-vit --no-use-ema-weights`.
 
-Input is the existing Cosmos WAM request JSON with
-`extra.action128.return_video=false`. Supply it as
+Input is the existing Cosmos WAM request JSON. Set
+`extra.action128.return_video=false` for action-only latency measurements. Supply it as
 `OmniDiffusionSamplingParams.extra_args["pwm_request"]`; the sampling parameters'
 seed, steps and guidance take precedence. The output payload carries normalized
 and physical Action128 values, sparse mask, source domain and timestamps.
 
-Only single-GPU non-AR action delivery is currently implemented. The video tower
-still participates in joint denoising. Generic caching, step batching and
-parallelism are not advertised. UND caching is experimental and disabled by
-default pending full-trajectory validation.
+The single-GPU non-AR path always runs the video tower during joint denoising.
+With `return_video=true`, it also decodes frames and returns a uint8 THWC array
+in the Omni output's `images` list. Frames use a private temporary NumPy file
+between environments (no pickle), removed after delivery.
+
+Generic caching, step batching, parallelism, sleep and offload are unsupported.
+UND caching is opt-in: enable both `pwm_reuse_und` and `pwm_projected_und` to use
+the projected-key cache. The legacy normalized-key cache fails the BF16
+compiled acceptance test and must not be treated as the validated optimization.

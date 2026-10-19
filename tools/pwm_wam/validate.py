@@ -143,7 +143,17 @@ def main():
             if len(outputs) != 1:
                 raise RuntimeError(f"Expected one output, received {len(outputs)}")
             mm = outputs[0].multimodal_output
-            return {"action": mm["actions"], **mm["metadata"]["actions"]}
+            output = {"action": mm["actions"], **mm["metadata"]["actions"]}
+            if request.get("extra", {}).get("action128", {}).get("return_video", True):
+                video = outputs[0].images[0]
+                output["video"] = {
+                    "shape": list(video.shape),
+                    "dtype": str(video.dtype),
+                    "sha256": hashlib.sha256(video.tobytes()).hexdigest(),
+                    "std": float(video.std()),
+                    "fps": mm["fps"],
+                }
+            return output
 
         def close():
             engine.close()

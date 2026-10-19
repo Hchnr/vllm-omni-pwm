@@ -6,18 +6,20 @@ import json
 import os
 import select
 import subprocess
+import tempfile
 import threading
 import weakref
 from collections.abc import Iterable
 from pathlib import Path
 
+import numpy as np
 from torch import Tensor, nn
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 
-def _stop_worker(process: subprocess.Popen[str]) -> None:
+def _stop_worker(process: subprocess.Popen[str], transport: tempfile.TemporaryDirectory) -> None:
     if process.stdin is not None:
         process.stdin.close()
     try:
@@ -31,6 +33,7 @@ def _stop_worker(process: subprocess.Popen[str]) -> None:
             process.wait()
     if process.stdout is not None:
         process.stdout.close()
+    transport.cleanup()
 
 
 class PwmWamPipeline(nn.Module):
@@ -67,6 +70,8 @@ class PwmWamPipeline(nn.Module):
         if not (checkpoint / "model.safetensors.index.json").is_file():
             raise ValueError("PWM requires a local sharded HF checkpoint")
         command = [str(python), "-u", str(Path(__file__).with_name("worker.py")), "--checkpoint", str(checkpoint)]
+        self._transport = tempfile.TemporaryDirectory(prefix="pwm-omni-output-")
+        command.extend(["--transport-dir", self._transport.name])
         for key in ("attention_backend", "precision"):
             if f"pwm_{key}" in config:
                 command.extend(["--" + key.replace("_", "-"), str(config[f"pwm_{key}"])])
@@ -86,7 +91,7 @@ class PwmWamPipeline(nn.Module):
         self._process = subprocess.Popen(
             command, cwd=cosmos_root, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1
         )
-        self._finalizer = weakref.finalize(self, _stop_worker, self._process)
+        self._finalizer = weakref.finalize(self, _stop_worker, self._process, self._transport)
         try:
             ready = self._receive()
             if not ready.get("ready"):
@@ -135,8 +140,18 @@ class PwmWamPipeline(nn.Module):
             self._process.stdin.write(json.dumps(raw, allow_nan=False) + "\n")
             self._process.stdin.flush()
             response = self._receive()
+            video = None
+            if response.get("video"):
+                video_path = Path(self._transport.name) / "video.npy"
+                video = np.load(video_path, allow_pickle=False)
+                video_path.unlink()
         if "error" in response:
             raise ValueError(response["error"])
         result = response["result"]
         actions = result.pop("action")
-        return DiffusionOutput(output={"payload": {"actions": actions}, "metadata": {"actions": result}})
+        payload = {"actions": actions}
+        metadata = {"actions": result}
+        if video is not None:
+            payload["video"] = [video]
+            metadata["video"] = {"fps": response["video_fps"]}
+        return DiffusionOutput(output={"payload": payload, "metadata": metadata})

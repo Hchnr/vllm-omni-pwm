@@ -21,6 +21,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--reference-config", type=Path)
+    parser.add_argument("--transport-dir", type=Path)
     parser.add_argument("--attention-backend", choices=("sdpa", "flash3"), default="flash3")
     parser.add_argument("--precision", choices=("bfloat16", "float32"), default="bfloat16")
     parser.add_argument("--compile", action="store_true")
@@ -103,8 +104,8 @@ def main():
                         prepared, batch = prepare_wam_request(
                             request, spec, model.config, Path(request_dir), model.input_video_key
                         )
-                        if prepared.return_video:
-                            raise ValueError("PWM action output requires extra.action128.return_video=false")
+                        if prepared.return_video and args.transport_dir is None:
+                            raise ValueError("Video delivery requires a worker transport directory")
                         batch = misc.to(batch, device="cuda")
                         with torch.inference_mode():
                             samples = model.generate_samples_from_batch(
@@ -128,8 +129,17 @@ def main():
                             physical = physical.masked_fill(~mask, 0).cpu()
                             if not torch.isfinite(normalized).all() or not torch.isfinite(physical).all():
                                 raise RuntimeError("Non-finite Action128 output")
+                        if prepared.return_video:
+                            import numpy as np
+
+                            with torch.inference_mode():
+                                video = ((model.decode(samples["vision"][0]) + 1) / 2).clamp(0, 1)
+                                frames = (video[0].permute(1, 2, 3, 0) * 255).to(torch.uint8).cpu().numpy()
+                            np.save(args.transport_dir / "video.npy", frames, allow_pickle=False)
                         emit(
                             {
+                                "video": prepared.return_video,
+                                "video_fps": prepared.sample_args["fps"],
                                 "result": {
                                     "action": physical.tolist(),
                                     "normalized_action": normalized.tolist(),
@@ -143,7 +153,7 @@ def main():
                                         batch["ai_caption"][0].encode()
                                     ).hexdigest(),
                                     "elapsed_seconds": time.perf_counter() - started,
-                                }
+                                },
                             }
                         )
                 except (ValueError, TypeError, KeyError) as exc:
