@@ -118,11 +118,12 @@ class PwmAttentionWeights(nn.Module):
             setattr(self, "q_norm" + suffix, PwmRMSNorm(dim))
             setattr(self, "k_norm" + suffix, PwmRMSNorm(dim))
 
-    def project(self, x: Tensor, suffix: str = "") -> tuple[Tensor, Tensor, Tensor]:
+    def project(self, x: Tensor, suffix: str = "", *, normalize_key: bool = True) -> tuple[Tensor, Tensor, Tensor]:
         q = getattr(self, "q_proj" + suffix)(x).view(-1, self.heads, self.dim)
         k = getattr(self, "k_proj" + suffix)(x).view(-1, self.kv_heads, self.dim)
         v = getattr(self, "v_proj" + suffix)(x).view(-1, self.kv_heads, self.dim)
-        return getattr(self, "q_norm" + suffix)(q), getattr(self, "k_norm" + suffix)(k), v
+        key = getattr(self, "k_norm" + suffix)(k) if normalize_key else k
+        return getattr(self, "q_norm" + suffix)(q), key, v
 
 
 class PwmActionBlock(PwmAttentionWeights):
@@ -174,9 +175,12 @@ class PwmThreeTowerLayer(nn.Module):
         attn, act = self.self_attn, self.action_block_moe_gen_action
         cached = und_cache is not None and len(und_cache) != 0
         if cached:
-            und_output, ku, vu = und_cache[0]
+            und_output, raw_ku, vu = und_cache[0]
         else:
-            qu, ku, vu = attn.project(self.input_layernorm(und))
+            qu, raw_ku, vu = attn.project(self.input_layernorm(und), normalize_key=False)
+        # A normalized cached K forces BF16 materialization between norm/RoPE.
+        # Preserve the uncached compiler fusion by retaining the linear output.
+        ku = attn.k_norm(raw_ku)
         qv, kv, vv = attn.project(self.input_layernorm_moe_gen(video), "_moe_gen")
         qa, ka, va = act.project(act.input_layernorm(action))
         keys, values = (ku, kv, ka), (vu, vv, va)
@@ -212,7 +216,7 @@ class PwmThreeTowerLayer(nn.Module):
             und = und + attn.o_proj(yu)
             und = und + self.mlp(self.post_attention_layernorm(und))
             if und_cache is not None:
-                und_cache.append((und, ku, vu))
+                und_cache.append((und, raw_ku, vu))
         video = video + attn.o_proj_moe_gen(yv)
         video = video + self.mlp_moe_gen(self.post_attention_layernorm_moe_gen(video))
         return und, video, action
