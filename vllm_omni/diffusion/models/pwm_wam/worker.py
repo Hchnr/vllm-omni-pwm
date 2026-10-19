@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--reuse-und", action="store_true")
     parser.add_argument("--projected-und", action="store_true")
     args = parser.parse_args()
+    if args.compile and args.reuse_und and not args.projected_und:
+        parser.error("Compiled UND reuse requires --projected-und; normalized-key caching failed validation")
     if args.projected_und and not args.reuse_und:
         parser.error("--projected-und requires --reuse-und")
     if args.precision == "float32" and args.attention_backend != "sdpa":

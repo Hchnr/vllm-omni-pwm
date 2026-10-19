@@ -17,6 +17,7 @@ from torch import Tensor, nn
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
+from vllm_omni.errors import OmniClientError
 
 
 def _stop_worker(process: subprocess.Popen[str], transport: tempfile.TemporaryDirectory) -> None:
@@ -55,10 +56,18 @@ class PwmWamPipeline(nn.Module):
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         if not visible or len(visible.split(",")) != 1:
             raise ValueError("Set CUDA_VISIBLE_DEVICES to exactly one GPU for PWM")
-        if od_config.enable_sleep_mode or od_config.enable_cpu_offload:
+        if (
+            od_config.enable_sleep_mode
+            or od_config.enable_cpu_offload
+            or od_config.enable_layerwise_offload
+            or od_config.enable_distributed_layerwise_offload
+            or od_config.diffusion_offload_config
+        ):
             raise ValueError("PWM worker owns device memory; Omni sleep/offload is unsupported")
         if od_config.cache_backend not in (None, "none"):
             raise ValueError("PWM does not support generic diffusion cache backends")
+        if od_config.quantization_config is not None or od_config.lora_path:
+            raise ValueError("PWM runtime does not support Omni quantization or LoRA")
         config = od_config.model_config
         # Preserve the venv symlink: resolving it selects the base interpreter
         # and loses the worker environment's site-packages.
@@ -121,13 +130,13 @@ class PwmWamPipeline(nn.Module):
 
     def forward(self, req: DiffusionRequestBatch, **kwargs) -> DiffusionOutput:
         if len(req.prompts) != 1:
-            raise ValueError("PWM currently accepts exactly one request per forward")
+            raise OmniClientError("PWM currently accepts exactly one request per forward")
         params = req.sampling_params
         if params.num_outputs_per_prompt != 1:
-            raise ValueError("PWM requires num_outputs_per_prompt=1")
+            raise OmniClientError("PWM requires num_outputs_per_prompt=1")
         raw = params.extra_args.get("pwm_request")
         if not isinstance(raw, dict):
-            raise ValueError("Provide the Cosmos WAM request in extra_args.pwm_request")
+            raise OmniClientError("Provide the Cosmos WAM request in extra_args.pwm_request")
         raw = dict(raw)
         # The sampling object is authoritative for scheduler-visible parameters.
         raw["seed"] = params.seed
@@ -146,7 +155,7 @@ class PwmWamPipeline(nn.Module):
                 video = np.load(video_path, allow_pickle=False)
                 video_path.unlink()
         if "error" in response:
-            raise ValueError(response["error"])
+            raise OmniClientError(response["error"])
         result = response["result"]
         actions = result.pop("action")
         payload = {"actions": actions}

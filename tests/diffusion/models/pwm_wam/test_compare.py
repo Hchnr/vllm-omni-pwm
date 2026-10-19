@@ -12,6 +12,7 @@ pytestmark = [pytest.mark.cpu, pytest.mark.core_model]
 spec = importlib.util.spec_from_file_location(
     "pwm_compare", Path(__file__).resolve().parents[4] / "tools/pwm_wam/compare.py"
 )
+assert spec is not None and spec.loader is not None
 comparison = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(comparison)
 

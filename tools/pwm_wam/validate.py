@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--reuse-und", action="store_true")
     parser.add_argument("--projected-und", action="store_true")
     parser.add_argument("--steps", type=int, default=5)
+    parser.add_argument("--check-invalid-request", action="store_true")
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
     args = parser.parse_args()
@@ -135,11 +136,15 @@ def main():
                 guidance_scale=request["guidance"],
                 extra_args={"pwm_request": request},
             )
-            outputs = loop.run_until_complete(
-                engine.step(
-                    OmniDiffusionRequest(prompt=request["prompt"], sampling_params=params, request_id=f"pwm-{index}")
-                )
-            )
+
+            async def execute():
+                final = []
+                req = OmniDiffusionRequest(prompt=request["prompt"], sampling_params=params, request_id=f"pwm-{index}")
+                async for output_batch in engine.step_streaming(req):
+                    final = output_batch
+                return final
+
+            outputs = loop.run_until_complete(execute())
             if len(outputs) != 1:
                 raise RuntimeError(f"Expected one output, received {len(outputs)}")
             mm = outputs[0].multimodal_output
@@ -161,6 +166,21 @@ def main():
 
     result["startup_seconds"] = time.perf_counter() - started
     try:
+        if args.check_invalid_request:
+            if args.mode != "engine":
+                raise ValueError("--check-invalid-request requires engine mode")
+            from vllm_omni.errors import OmniClientError
+
+            invalid = json.loads(json.dumps(requests[0]))
+            invalid["extra"]["action128"]["action_dim_mask"] = [True]
+            try:
+                run(invalid, "invalid")
+            except OmniClientError as exc:
+                if "action_dim_mask" not in str(exc):
+                    raise
+                result["invalid_request_rejected"] = True
+            else:
+                raise AssertionError("Invalid action mask was accepted")
         for repetition in range(args.warmup + args.repeats):
             for index, request in enumerate(requests):
                 started = time.perf_counter()

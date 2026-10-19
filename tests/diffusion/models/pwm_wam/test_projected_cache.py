@@ -20,6 +20,7 @@ small_layer_forward = pytest.importorskip("cosmos_framework.model.generator.mot.
 spec = importlib.util.spec_from_file_location(
     "pwm_cache", Path(__file__).resolve().parents[4] / "vllm_omni/diffusion/models/pwm_wam/und_cache.py"
 )
+assert spec is not None and spec.loader is not None
 cache = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cache)
 
