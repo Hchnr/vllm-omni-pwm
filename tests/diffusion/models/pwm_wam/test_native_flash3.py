@@ -13,12 +13,16 @@ from vllm_omni.diffusion.models.pwm_wam.transformer_pwm_wam import attention
 pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, *hardware_marks(res={"cuda": "H100"}, num_cards=1)]
 
 
+@pytest.mark.parametrize("backend", ["flash3", "flash3_nv"])
 @pytest.mark.parametrize("causal", [False, True])
 @torch.inference_mode()
-def test_flash3_fullgraph_matches_direct_kernel(causal):
+def test_flash3_fullgraph_matches_direct_kernel(causal, backend):
     if os.environ.get("PWM_FA3_TEST") != "1":
         pytest.skip("Set PWM_FA3_TEST=1 on Hopper to test bundled FA3")
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
+    if backend == "flash3_nv":
+        flash_attn_varlen_func = pytest.importorskip("flash_attn_3_nv.flash_attn_interface").flash_attn_varlen_func
+    else:
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
 
     generator = torch.Generator(device="cuda").manual_seed(1020)
     q, k, v = [
@@ -35,18 +39,22 @@ def test_flash3_fullgraph_matches_direct_kernel(causal):
         max_seqlen_k=129,
         causal=causal,
         softmax_scale=128**-0.5,
-        fa_version=3,
         num_splits=1,
-    ).flatten(1)
+        **({"fa_version": 3} if backend == "flash3" else {"return_attn_probs": True}),
+    )
+    if isinstance(expected, tuple):
+        expected = expected[0]
+    expected = expected.flatten(1)
     compiled = torch.compile(attention, fullgraph=True, dynamic=False)
-    actual = compiled(q, k, v, causal=causal, backend="flash3")
+    actual = compiled(q, k, v, causal=causal, backend=backend)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    reused = compiled(q, k, v, causal=causal, backend="flash3", metadata=(cu, cu))
+    reused = compiled(q, k, v, causal=causal, backend=backend, metadata=(cu, cu))
     torch.testing.assert_close(reused, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("backend", ["flash3", "flash3_nv"])
 @torch.inference_mode()
-def test_compiled_und_cache_is_request_local():
+def test_compiled_und_cache_is_request_local(backend):
     if os.environ.get("PWM_FA3_TEST") != "1":
         pytest.skip("Set PWM_FA3_TEST=1 on Hopper to test bundled FA3")
     from vllm_omni.diffusion.models.pwm_wam.transformer_pwm_wam import PwmThreeTowerLayer
@@ -65,7 +73,7 @@ def test_compiled_und_cache_is_request_local():
         .to(device="cuda", dtype=torch.bfloat16)
         .eval()
     )
-    layer.attention_backend = "flash3"
+    layer.attention_backend = backend
     compiled = torch.compile(layer, fullgraph=True, dynamic=False)
     rope = tuple(
         (

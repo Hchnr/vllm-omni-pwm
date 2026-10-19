@@ -188,7 +188,7 @@ def main():
     parser.add_argument("--vae", type=Path, required=True)
     parser.add_argument("--tokenizer", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--attention-backend", choices=("sdpa", "flash3"), default="sdpa")
+    parser.add_argument("--attention-backend", choices=("sdpa", "flash3", "flash3_nv"), default="sdpa")
     parser.add_argument("--compile", action="store_true", help="Compile each transformer layer")
     parser.add_argument("--experimental-backend", action="store_true")
     parser.add_argument("--warmup-input", type=Path)

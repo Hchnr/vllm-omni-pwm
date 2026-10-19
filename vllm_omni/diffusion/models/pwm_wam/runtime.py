@@ -5,6 +5,7 @@
 import hashlib
 import json
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -34,14 +35,15 @@ class PwmWamRuntime(nn.Module):
         cache_und=False,
     ):
         super().__init__()
-        if attention_backend not in ("sdpa", "flash3"):
-            raise ValueError("Native PWM supports sdpa or flash3")
+        if attention_backend not in ("sdpa", "flash3", "flash3_nv"):
+            raise ValueError("Native PWM supports sdpa, flash3 or flash3_nv")
         # Match the reference runtime's precision contract. vLLM's CUDA
         # platform disables cuDNN SDPA globally; restore this backend before
         # execution in this dedicated model worker.
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
         torch.backends.cuda.enable_cudnn_sdp(True)
+        self.compile_layers = compile_layers
         self.attention_backend = attention_backend
         self.cache_und = cache_und
         self.device = device
@@ -142,7 +144,7 @@ class PwmWamRuntime(nn.Module):
             # Per-request, per-CFG-branch ownership; never reused across calls.
             cache = [[] for _ in self.transformer.language_model.model.layers] if self.cache_und else None
             attention_metadata = None
-            if self.attention_backend == "flash3":
+            if self.attention_backend in ("flash3", "flash3_nv"):
                 lengths = (len(ids), grid[0] * grid[1] * grid[2], request.action_length)
                 attention_metadata = tuple(
                     torch.tensor([0, n], dtype=torch.int32, device=self.device) for n in (*lengths, sum(lengths))
@@ -196,7 +198,15 @@ class PwmWamRuntime(nn.Module):
         started = time.perf_counter()
         request = prepare_request(raw, self.spec)
         clean = self.encode_observation(request)
-        video, normalized = self.sample(request, clean)
+        # Two CFG branches and cache fill/reuse specialize each input shape.
+        # Match the reference capacity, scoped to this serialized worker call.
+        limits = (
+            torch._dynamo.config.patch(recompile_limit=512, accumulated_recompile_limit=4096)
+            if self.compile_layers
+            else nullcontext()
+        )
+        with limits:
+            video, normalized = self.sample(request, clean)
         normalized = normalized.float()
         normalizer = self.transformer.action_normalization
         domain = request.normalization_id

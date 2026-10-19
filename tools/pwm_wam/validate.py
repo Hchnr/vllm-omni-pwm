@@ -32,7 +32,7 @@ def main():
     parser.add_argument("--experimental-native-backend", action="store_true")
     parser.add_argument("--vae", type=Path)
     parser.add_argument("--tokenizer", type=Path)
-    parser.add_argument("--attention-backend", choices=("flash3", "sdpa"), default="sdpa")
+    parser.add_argument("--attention-backend", choices=("flash3", "flash3_nv", "sdpa"), default="sdpa")
     parser.add_argument("--precision", choices=("bfloat16", "float32"), default="bfloat16")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--reuse-und", action="store_true")
@@ -48,6 +48,8 @@ def main():
         parser.error("Native validation requires BF16; use --native-und-cache for native caching")
     if args.native_und_cache and not args.native:
         parser.error("--native-und-cache requires --native")
+    if args.mode == "worker" and args.attention_backend == "flash3_nv":
+        parser.error("Reference worker selects NVIDIA FA3 with --attention-backend flash3")
     if args.experimental_native_backend and not args.native:
         parser.error("--experimental-native-backend requires --native")
     if args.mode == "runtime" and not args.native:

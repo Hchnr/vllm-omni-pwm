@@ -40,11 +40,11 @@ def rotate(x: Tensor, rope: Rope) -> Tensor:
 
 
 @torch.library.custom_op("vllm_omni::pwm_fa3_attention", mutates_args=())
-def pwm_fa3_attention(q: Tensor, k: Tensor, v: Tensor, cu_q: Tensor, cu_k: Tensor, causal: bool) -> Tensor:
+def pwm_fa3_attention(
+    q: Tensor, k: Tensor, v: Tensor, cu_q: Tensor, cu_k: Tensor, causal: bool, provider: str
+) -> Tensor:
     """Keep the inference-only FA3 call opaque to Inductor with known metadata."""
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
-
-    return flash_attn_varlen_func(
+    kwargs = dict(
         q=q.contiguous(),
         k=k.contiguous(),
         v=v.contiguous(),
@@ -54,13 +54,21 @@ def pwm_fa3_attention(q: Tensor, k: Tensor, v: Tensor, cu_q: Tensor, cu_k: Tenso
         max_seqlen_k=k.shape[0],
         causal=causal,
         softmax_scale=q.shape[-1] ** -0.5,
-        fa_version=3,
         num_splits=1,
     )
+    if provider == "flash3_nv":
+        from flash_attn_3_nv.flash_attn_interface import flash_attn_varlen_func
+
+        return flash_attn_varlen_func(**kwargs, return_attn_probs=True)[0]
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+    return flash_attn_varlen_func(**kwargs, fa_version=3)
 
 
 @pwm_fa3_attention.register_fake
-def _pwm_fa3_attention_fake(q: Tensor, k: Tensor, v: Tensor, cu_q: Tensor, cu_k: Tensor, causal: bool) -> Tensor:
+def _pwm_fa3_attention_fake(
+    q: Tensor, k: Tensor, v: Tensor, cu_q: Tensor, cu_k: Tensor, causal: bool, provider: str
+) -> Tensor:
     return torch.empty(q.shape, dtype=q.dtype, device=q.device)
 
 
@@ -73,13 +81,13 @@ def attention(
     backend: str = "sdpa",
     metadata: tuple[Tensor, Tensor] | None = None,
 ) -> Tensor:
-    if backend == "flash3":
+    if backend in ("flash3", "flash3_nv"):
         if metadata is None:
             metadata = (
                 torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device),
                 torch.tensor([0, k.shape[0]], dtype=torch.int32, device=k.device),
             )
-        return pwm_fa3_attention(q, k, v, *metadata, causal).flatten(1)
+        return pwm_fa3_attention(q, k, v, *metadata, causal, backend).flatten(1)
     if backend != "sdpa":
         raise ValueError(f"Unsupported native PWM attention backend: {backend}")
     mask = torch.ones((q.shape[0], k.shape[0]), dtype=torch.bool, device=q.device)
