@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -61,6 +62,16 @@ def main():
     result["gpu"] = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=index,uuid,name,driver_version", "--format=csv"], text=True
     )
+    result["input_asset_sha256"] = [
+        hashlib.sha256(Path(request["vision_path"]).read_bytes()).hexdigest() for request in requests
+    ]
+
+    def gpu_snapshot():
+        return subprocess.check_output(
+            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_memory", "--format=csv"], text=True
+        )
+
+    result["gpu_processes_before"] = gpu_snapshot()
     started = time.perf_counter()
     if args.mode == "worker":
         command = [
@@ -199,6 +210,15 @@ def main():
                     result["runs"].append({"request_index": index, "seconds": elapsed, "output": output})
                     args.output.write_text(json.dumps(result, indent=2) + "\n")
         latencies = [r["seconds"] for r in result["runs"]]
+        result["gpu_processes_after"] = gpu_snapshot()
+        result["per_request_latency"] = {}
+        for index in range(len(requests)):
+            values = sorted(r["seconds"] for r in result["runs"] if r["request_index"] == index)
+            result["per_request_latency"][str(index)] = {
+                "count": len(values),
+                "p50_seconds": statistics.median(values),
+                "p95_seconds": values[max(0, math.ceil(0.95 * len(values)) - 1)],
+            }
         result["median_seconds"] = statistics.median(latencies)
         result["chunks_per_second"] = len(latencies) / sum(latencies)
         args.output.write_text(json.dumps(result, indent=2) + "\n")

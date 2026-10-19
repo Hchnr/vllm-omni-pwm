@@ -62,3 +62,16 @@ with `--vae`, `--tokenizer`, and `--attention-backend sdpa`. The legacy
 execution does not use that interpreter. `capture_native_fixture.py` is
 reference-only tooling and must run in the Cosmos environment. Its safetensors
 fixtures are validation artifacts, not production inputs.
+
+### Native HTTP facade
+
+The optional local facade uses the native Omni worker and accepts the existing
+Cosmos `ray.submit` `/generate` request and `SampleOutputs` response envelope.
+Run `python -m vllm_omni.diffusion.models.pwm_wam.serving --help` for checkpoint,
+VAE, tokenizer, output directory and warmup flags. It defaults to loopback,
+BF16 eager SDPA and one request at a time (503 + Retry-After when busy).
+Conditioning images must be local files accessible to the worker. Video files
+are saved under unique server-generated directories and served through
+`/outputs`; `/info` exposes configuration/contract hashes and warmup status.
+GPU integration and original-client acceptance are tracked separately from
+model-free HTTP tests. Do not infer benchmark acceptance from HTTP unit tests.
