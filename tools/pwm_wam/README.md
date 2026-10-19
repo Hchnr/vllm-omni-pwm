@@ -70,7 +70,7 @@ recorded co-tenant processes before interpreting timing.
 
 ## Numerical acceptance and limits
 
-Sixteen independent-reference cases now match **exactly** in normalized and
+Against the eager SDPA numerical reference, sixteen cases match **exactly** in normalized and
 physical actions: real LIBERO/DROID/RoboCasa/RoboTwin observations, 12 new fixed seeds
 plus two original seeds, one/two/three camera layouts, CFG 1/1.5, 5/10/35 steps,
 short/two-second horizons and different video/action FPS. Reduced-resolution
@@ -82,10 +82,14 @@ Two 1,000-request small-resolution stress runs (cache off/on) had exact
 replay hashes. A real HTTP disconnect retained model ownership until completion
 and recovered with exact actions.
 
-Performance acceptance is **not complete**. The deployment baseline is Cosmos
-FA3 + per-layer compile + request-local metadata reuse, with HTTP CUDA Graph,
-UND compute caching and QKV fusion disabled. Native superiority over that
-baseline has not been established. Eager SDPA is a numerical reference only.
+Deployment acceptance is **limited to the tested LIBERO profiles**. The baseline
+is Cosmos FA3 + per-layer compile + request-local metadata reuse, with HTTP CUDA
+Graph, UND compute caching and QKV fusion disabled. Native bundled FA3 + compile
++ raw UND projection caching passes the two LIBERO inputs at 5 and 35 steps.
+On shared-GPU A/B/A, the 5-step profile improves median latency by 16–17% and
+throughput by 19% against that optimized baseline. Cross-domain correctness is
+not complete: DROID fails the locked tolerance. Both FA3 modes remain explicitly
+experimental. Eager SDPA is a numerical reference only.
 
 On the task's shared H100 80GB, same-GPU A/B/A against eager SDPA (two inputs,
 two warmups and twenty measurements per input per stage), native UND caching
@@ -127,7 +131,7 @@ network and sampling-boundary errors. `audit_hf.py` checks export structure.
 The earlier `PwmWamPipeline` compatibility adapter is retained for reference
 experiments. It uses `pwm_python`/`pwm_cosmos_root` and runs a Cosmos subprocess;
 it is not the native implementation. Its projected-UND/compile experiments
-must not be used as acceptance evidence against the stricter eager baseline.
+must not be used as native-engine deployment acceptance evidence.
 
 ### Optimized deployment comparison
 
@@ -182,4 +186,38 @@ compilation for new shapes.
 
 HTTP validation supports `--attention-backend flash3_nv --compile --cache-und
 --experimental-backend`; `/info` exposes all four selections. Production defaults
-remain unchanged while the expanded optimized-reference validation is running.
+remain unchanged because expanded optimized-reference validation has failures.
+
+
+### Corrected measured results (2026-10-20)
+
+Two complete LIBERO requests, 960×640, 40 actions / 2 seconds, 5 denoising steps,
+CFG 1.5, BF16, seeds 42/43, actions only; each stage has 2 warmups and 20 measured
+runs per request on the same shared H100 GPU1:
+
+| Path | Input 0 p50 / p95 (s) | Input 1 p50 / p95 (s) | chunks/s |
+| --- | --- | --- | --- |
+| Cosmos FA3 + compile, before | 4.6209 / 4.6443 | 4.6324 / 4.6600 | 0.22397 |
+| Native FA3 + compile + UND cache | 3.8529 / 3.8686 | 3.8446 / 3.8685 | 0.26760 |
+| Cosmos FA3 + compile, after | 4.6002 / 4.6170 | 4.5915 / 4.6268 | 0.22508 |
+
+All 40 candidate outputs pass both references at normalized active-slot
+max-abs ≤ 0.05 and RMSE ≤ 0.01. Evidence:
+`artifacts/validation/final_fa3_ab_1020_{reference_before,candidate,reference_after,comparison_before,comparison_after}.json`.
+This measures the integrated implementation, not an isolated scheduler benefit:
+UND caching can also be implemented in Cosmos. There is no real batching or
+continuous-batching throughput result. Startup remains slower (128 s versus
+53 s, excluding request warmups). Shared co-tenant GPU load limits generalization.
+
+Expanded bundled-FA3 testing fails DROID (max-abs 0.05495 / RMSE 0.01113),
+while RoboCasa passes. Switching to the reference's NV FA3 does not solve
+compiled rounding differences: five of eight NV trajectories fail, including
+RoboTwin EEF/joint. Failed NV runs are not performance evidence. Layer and
+attention fixtures localize differences in compiled UND K norm/RoPE, but the
+root cause is not yet fixed. Diagnostic variants remain untracked artifacts;
+none changed production numerical behavior or relaxed the tolerance.
+
+Regression evidence: `final_native_suite_1020.log` (51 passed, 3 skipped) and
+`independent_reference_tests_1020.log` (8 passed in the Cosmos environment).
+The earlier 16-case exact SDPA and HTTP stress checks do not establish FA3
+cross-domain correctness or FA3 service stress reliability.
