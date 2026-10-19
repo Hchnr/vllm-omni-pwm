@@ -210,7 +210,11 @@ continuous-batching throughput result. Startup remains slower (128 s versus
 53 s, excluding request warmups). Shared co-tenant GPU load limits generalization.
 
 Expanded bundled-FA3 testing fails DROID (max-abs 0.05495 / RMSE 0.01113),
-while RoboCasa passes. Switching to the reference's NV FA3 does not solve
+while RoboCasa and RoboTwin EEF pass. The final rerun completes all four domain
+requests without a compilation-limit error, but RoboTwin joint fails RMSE
+(0.01275). Across four LIBERO and four additional domain trajectories, six of
+eight pass. Evidence: `native_engine_fa3_domains_final_comparison_1020.json`.
+Switching to the reference's NV FA3 does not solve
 compiled rounding differences: five of eight NV trajectories fail, including
 RoboTwin EEF/joint. Failed NV runs are not performance evidence. Layer and
 attention fixtures localize differences in compiled UND K norm/RoPE, but the
@@ -221,3 +225,11 @@ Regression evidence: `final_native_suite_1020.log` (51 passed, 3 skipped) and
 `independent_reference_tests_1020.log` (8 passed in the Cosmos environment).
 The earlier 16-case exact SDPA and HTTP stress checks do not establish FA3
 cross-domain correctness or FA3 service stress reliability.
+
+The FA3/compile/cache HTTP profile passes main-thread warmup to HTTP-thread
+execution, A/B/A replay, exact equality with direct-engine actions, recovery
+after invalid requests, and the unmodified Cosmos `ray.submit` client.
+Evidence: `artifacts/validation/fa3_1020_http_validation.json`. This is not a
+FA3 video or long-duration stress test. The validation server was shut down.
+The machine-readable corrected summary is `optimized_acceptance_1020.json`;
+the old `final_native_acceptance.json` is marked as historical SDPA-only evidence.
