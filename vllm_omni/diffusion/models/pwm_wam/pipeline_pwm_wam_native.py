@@ -28,7 +28,7 @@ class PwmWamNativePipeline(nn.Module):
         if od_config.step_execution or od_config.max_num_seqs != 1:
             raise ValueError("Native PWM requires request execution with max_num_seqs=1")
         if not od_config.enforce_eager:
-            raise ValueError("Set enforce_eager=True; pwm_compile is experimental transformer-only compilation")
+            raise ValueError("Native PWM requires enforce_eager=True; compilation is not accepted")
         if (
             od_config.enable_sleep_mode
             or od_config.enable_cpu_offload

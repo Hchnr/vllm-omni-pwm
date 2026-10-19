@@ -12,10 +12,12 @@ from pathlib import Path
 import pytest
 import torch
 
+from tests.helpers.mark import hardware_marks
+
 pytest.importorskip("vllm")
 from vllm_omni.diffusion.models.schedulers.scheduling_flow_unipc_multistep import FlowUniPCMultistepScheduler
 
-pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, pytest.mark.gpu, pytest.mark.cuda]
+pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, *hardware_marks(res={"cuda": "L4"}, num_cards=1)]
 
 
 @pytest.mark.parametrize("steps", [5, 10, 35])
