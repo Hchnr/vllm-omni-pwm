@@ -157,3 +157,29 @@ For experimental native FA3+compile engine measurements, add
 `validate.py --mode engine --native`. `--native-und-cache` tests compiled
 request-local UND reuse. Keep these opt-in until full-trajectory validation and
 the optimized-reference performance checks pass.
+
+### Match the reference FA3 provider
+
+`flash3` uses vLLM's bundled FA3. `flash3_nv` uses the optional
+`flash_attn_3_nv` package, matching the existing Cosmos kernel implementation.
+The two providers can produce different BF16 outputs on identical noncausal
+Q/K/V; they must be validated separately over full trajectories. The native
+model never imports Cosmos for either provider.
+
+For local reproducibility, the reference environment's
+`flash_attn_3_nv==1.0.3+cu130.torch210` wheel was repacked without changing its
+binaries and installed with `uv pip install --python .venv/bin/python --no-deps`
+into the native PyTorch 2.13 environment. The local wheel and SHA256 provenance
+are under `artifacts/validation/nv_fa3_install_provenance_1020.json`. This records
+the tested environment, not general cross-version ABI compatibility. Install
+the matching optional dependency before selecting `flash3_nv`.
+
+Compiled requests scope Dynamo's recompile/accumulated limits to 512/4096,
+matching the reference capacity, and restore the process settings afterwards.
+The default limit of eight fails after a few shapes because CFG branches and
+cache fill/reuse specialize separately. This does not promise zero cold
+compilation for new shapes.
+
+HTTP validation supports `--attention-backend flash3_nv --compile --cache-und
+--experimental-backend`; `/info` exposes all four selections. Production defaults
+remain unchanged while the expanded optimized-reference validation is running.
