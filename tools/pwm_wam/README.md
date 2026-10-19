@@ -1,86 +1,108 @@
-# PWM WAM integration validation
+# PWM WAM native integration
 
-`validate.py` runs actual requests through either the isolated reference runtime
-or the vLLM-Omni diffusion engine. Use the same checkpoint, precision, inputs,
-steps, guidance and GPU for timing comparisons. Warmup is excluded; retain all
-outputs to check correctness before interpreting performance.
+`PwmWamNativePipeline` runs the Action128 three-tower transformer, Wan VAE,
+tokenizer and UniPC directly in the vLLM-Omni diffusion worker. Production
+execution has no Cosmos import or reference-runtime subprocess. The supported
+configuration is Nano `width_only_1b`, BF16 eager SDPA, no-state WAM, first-frame
+image conditioning, one GPU and one request at a time.
 
-This is a compatibility backend, not a port of the three-tower transformer to
-upstream Cosmos3 kernels. It requires an installed Cosmos PWM environment via
-`pwm_python` and `pwm_cosmos_root` in `OmniDiffusionConfig.model_config`. Select
-`model_class_name="PwmWamPipeline"` explicitly. Do not add a Diffusers
-`model_index.json` to the native HF artifact: that changes the Cosmos loader's
-weight mapping. The artifact consists of `config.json`, a safetensors index and
-shards exported by Cosmos `scripts.export_model --no-vit --no-use-ema-weights`.
+The native HF artifact contains `config.json`, `model.safetensors.index.json`
+and all shards. **Do not add `model_index.json`**: it activates a different
+Diffusers weight mapping. The loader checks every native tensor name and shape,
+keeps separate source-normalization and projection IDs, and checks the stored
+Action128 contract digest. VAE and tokenizer paths must be locally available.
 
-Input is the existing Cosmos WAM request JSON. Set
-`extra.action128.return_video=false` for action-only latency measurements. Supply it as
-`OmniDiffusionSamplingParams.extra_args["pwm_request"]`; the sampling parameters'
-seed, steps and guidance take precedence. The output payload carries normalized
-and physical Action128 values, sparse mask, source domain and timestamps.
-
-The single-GPU non-AR path always runs the video tower during joint denoising.
-With `return_video=true`, it also decodes frames and returns a uint8 THWC array
-in the Omni output's `images` list. Frames use a private temporary NumPy file
-between environments (no pickle), removed after delivery.
-
-Generic caching, step batching, parallelism, sleep and offload are unsupported.
-UND caching is opt-in: enable both `pwm_reuse_und` and `pwm_projected_und` to use
-the projected-key cache. The legacy normalized-key cache fails the BF16
-compiled acceptance test and must not be treated as the validated optimization.
-
-## Native worker implementation (validation in progress)
-
-`PwmWamNativePipeline` runs the three towers, Wan VAE, tokenizer, and UniPC in
-one Omni worker process. It does not import Cosmos or spawn its runtime.
-Use `model_class_name="PwmWamNativePipeline"` and model config fields
-`pwm_vae_path`, `pwm_tokenizer_path`, `pwm_attention_backend` (`sdpa` or
-`flash3`), and optional `pwm_compile` (default false). Set `enforce_eager=True`
-on Omni: the optional PWM compile switch controls only transformer layers.
-Native request schema is the same `extra_args.pwm_request` envelope as above;
-conditioning currently accepts a local image. One GPU, one request per forward.
-Sleep/offload, generic cache backends, quantization, and LoRA are rejected.
-
-Full HF tensor coverage and real-request 36-layer velocity fixture replay are
-exact with SDPA. The VAE adapter preserves the checkpoint's BF16 RMSNorm
-arithmetic; newer Diffusers otherwise upcasts that normalization and changes
-conditioning. End-to-end acceptance and performance gates remain in progress;
-FA3 and compile are explicit experimental choices until those gates pass.
-
-Standalone native validation (Omni environment only):
+## Run the native HTTP service
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 LD_LIBRARY_PATH='' .venv/bin/python tools/pwm_wam/validate_native.py \
+CUDA_VISIBLE_DEVICES=1 LD_LIBRARY_PATH='' OMP_NUM_THREADS=1 \
+  .venv/bin/python -m vllm_omni.diffusion.models.pwm_wam.serving \
   --checkpoint artifacts/pwm-wam-hf \
-  --vae /path/to/Cosmos3-Nano/vae --tokenizer /path/to/Cosmos3-Nano-VLM \
-  --input /path/to/request.json --output /path/to/native_result.json
+  --vae /path/to/Cosmos3-Nano/vae \
+  --tokenizer /path/to/Cosmos3-Nano-VLM \
+  --output-dir outputs/pwm-wam --warmup-input /path/to/request.json \
+  --cache-und --host 127.0.0.1 --port 8019
 ```
 
-For actual Omni engine verification use `validate.py --mode engine --native`
-with `--vae`, `--tokenizer`, and `--attention-backend sdpa`. The legacy
-`--cosmos-root` and `--python` arguments still populate provenance; native
-execution does not use that interpreter. `capture_native_fixture.py` is
-reference-only tooling and must run in the Cosmos environment. Its safetensors
-fixtures are validation artifacts, not production inputs.
+This accepts the existing Cosmos `ray.submit` client through `/generate` and
+returns the original `SampleOutputs` envelope. `/outputs` serves generated
+files; `/info` reports configuration/contract hashes and completed warmup;
+`/models`, `/domains`, and `/healthz` support discovery. Conditioning images
+must be local files accessible to the worker. Concurrent generation returns
+503 with `Retry-After`; a disconnected caller does not release model ownership
+before its worker request finishes. Use one server process per GPU.
 
-### Native HTTP facade
+`--cache-und` reuses UND hidden states and K/V within one request, separately
+for each CFG branch. It defaults to off. Nothing is cached across requests.
+The VIDEO and ACTION towers still run jointly at every denoising step.
+`extra.action128.return_video=false` omits VAE decoding and video delivery,
+while `true` writes an MP4 that the original client downloads.
 
-The optional local facade uses the native Omni worker and accepts the existing
-Cosmos `ray.submit` `/generate` request and `SampleOutputs` response envelope.
-Run `python -m vllm_omni.diffusion.models.pwm_wam.serving --help` for checkpoint,
-VAE, tokenizer, output directory and warmup flags. It defaults to loopback,
-BF16 eager SDPA and one request at a time (503 + Retry-After when busy).
-Conditioning images must be local files accessible to the worker. Video files
-are saved under unique server-generated directories and served through
-`/outputs`; `/info` exposes configuration/contract hashes and warmup status.
-GPU integration and original-client acceptance are tracked separately from
-model-free HTTP tests. Do not infer benchmark acceptance from HTTP unit tests.
+## Direct engine configuration and validation
 
-Native acceptance update: BF16 eager SDPA matches the original eager DCP
-reference exactly for two full five-step action trajectories and all ten
-conditional/unconditional network boundaries of the second request. Native
-FA3 failed the final action tolerance (second input max-abs 0.14824, RMSE
-0.02445); the production native pipeline now rejects FA3 and compilation.
-The standalone replay/runtime tools retain them only for investigations.
-`--native-und-cache` enables an experimental request-local UND cache in engine
-validation. It is off by default and cannot be combined with compilation.
+Select `model_class_name="PwmWamNativePipeline"`, `enforce_eager=True`,
+`max_num_seqs=1`, and model config fields `pwm_vae_path`,
+`pwm_tokenizer_path`, `pwm_attention_backend="sdpa"`, and optionally
+`pwm_native_und_cache=True`. Supply the existing WAM request JSON as
+`OmniDiffusionSamplingParams.extra_args["pwm_request"]`. Sampling parameters'
+seed, steps and guidance take precedence over the embedded JSON.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 LD_LIBRARY_PATH='' OMP_NUM_THREADS=1 \
+  .venv/bin/python tools/pwm_wam/validate.py \
+  --mode engine --native --native-und-cache \
+  --checkpoint artifacts/pwm-wam-hf \
+  --vae /path/to/Cosmos3-Nano/vae --tokenizer /path/to/Cosmos3-Nano-VLM \
+  --cosmos-root /path/to/cosmos-framework-pwm \
+  --python /path/to/cosmos-framework-pwm/.venv/bin/python \
+  --attention-backend sdpa --input /path/to/request.json \
+  --warmup 2 --repeats 20 --check-invalid-request --output /path/to/native.json
+```
+
+The legacy `--cosmos-root` and `--python` arguments in this validation tool
+record reference provenance; native execution does not invoke that interpreter.
+Without `--steps`, the tool preserves each JSON's step count. It records every
+output and latency, per-input p50/p95, image hashes, revisions and GPU process
+snapshots. Compare with `compare.py`: normalized active-slot max-abs must be
+at most 0.05 and RMSE at most 0.01; inactive slots must be exactly zero.
+Matching benchmark arguments do not establish GPU exclusivity. Inspect the
+recorded co-tenant processes before interpreting timing.
+
+## Numerical acceptance and limits
+
+Fourteen independent-reference cases now match **exactly** in normalized and
+physical actions: real LIBERO/DROID/RoboCasa observations, 12 new fixed seeds
+plus two original seeds, one/two/three camera layouts, CFG 1/1.5, 5/10/35 steps,
+short/two-second horizons and different video/action FPS. Reduced-resolution
+cases test the numerical contract; they do not establish robot task quality.
+The matrix includes native request-local UND caching. Original-client action,
+video download/decode, warmup-to-HTTP-thread and A/B/A/restart replay also pass.
+Performance and sustained-request results are recorded separately in the task
+report; unit tests alone are not benchmark evidence.
+
+The compatibility arithmetic is deliberate: explicit SDPA masks, FP32 time
+embeddings, original BF16 VAE RMS normalization, TF32 disabled, cuDNN SDPA
+enabled, CPU sigma coefficients and the original UniPC 2x2 corrector rounding.
+A frozen PyTorch 2.10 CUDA fixture checks complete solver trajectories from a
+different runtime version. Same-environment reference-source tests alone did
+not catch the corrector rounding difference.
+
+Native FA3 failed full-trajectory tolerance (second initial input max-abs
+0.14824, RMSE 0.02445). The production pipeline rejects FA3 and compilation.
+Quantization, LoRA, generic diffusion caches, step batching, TP/CP, offload,
+sleep mode, autoregression and state/action conditioning are unsupported and
+rejected. The standalone `validate_native.py` retains backend/compile options
+for numerical investigations; those options do not imply production support.
+
+## Independent reference tools
+
+`validate.py --mode worker` and `capture_native_fixture.py` use the separate
+Cosmos environment to load the original DCP/HF model. Captured tensors use
+safetensors and are only validation inputs. `replay_native_fixture.py`,
+`replay_native_network.py` and `compare_native_trace.py` isolate layer, full
+network and sampling-boundary errors. `audit_hf.py` checks export structure.
+
+The earlier `PwmWamPipeline` compatibility adapter is retained for reference
+experiments. It uses `pwm_python`/`pwm_cosmos_root` and runs a Cosmos subprocess;
+it is not the native implementation. Its projected-UND/compile experiments
+must not be used as acceptance evidence against the stricter eager baseline.

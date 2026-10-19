@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--native-und-cache", action="store_true")
     parser.add_argument("--vae", type=Path)
     parser.add_argument("--tokenizer", type=Path)
-    parser.add_argument("--attention-backend", choices=("flash3", "sdpa"), default="flash3")
+    parser.add_argument("--attention-backend", choices=("flash3", "sdpa"), default="sdpa")
     parser.add_argument("--precision", choices=("bfloat16", "float32"), default="bfloat16")
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--reuse-und", action="store_true")
@@ -45,6 +45,8 @@ def main():
         parser.error("--native requires engine mode, --vae, and --tokenizer")
     if args.native and (args.reuse_und or args.projected_und or args.precision != "bfloat16"):
         parser.error("Native validation currently requires BF16 without UND reuse")
+    if args.native_und_cache and not args.native:
+        parser.error("--native-und-cache requires --native")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     requests = [json.loads(p.read_text()) for p in args.input]
     for request in requests:
