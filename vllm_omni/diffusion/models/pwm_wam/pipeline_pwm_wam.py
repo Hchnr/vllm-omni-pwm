@@ -66,6 +66,8 @@ class PwmWamPipeline(nn.Module):
                 command.extend(["--" + key.replace("_", "-"), str(config[f"pwm_{key}"])])
         if config.get("pwm_compile", False):
             command.append("--compile")
+        if config.get("pwm_projected_und", False):
+            command.append("--projected-und")
         if config.get("pwm_reuse_und", False):
             command.append("--reuse-und")
         env = dict(os.environ)

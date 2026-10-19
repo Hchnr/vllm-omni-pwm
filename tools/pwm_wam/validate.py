@@ -120,6 +120,7 @@ def main():
                     "pwm_cosmos_root": str(args.cosmos_root),
                     "pwm_compile": args.compile,
                     "pwm_reuse_und": args.reuse_und,
+                    "pwm_projected_und": args.projected_und,
                     "pwm_precision": args.precision,
                     "pwm_attention_backend": args.attention_backend,
                 },

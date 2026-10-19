@@ -11,9 +11,11 @@ import torch
 pytestmark = [pytest.mark.cpu, pytest.mark.core_model]
 
 pytest.importorskip("cosmos_framework")
-from cosmos_framework.model.generator.mot.inference_small_action_memory import SmallActionMemoryState
-from cosmos_framework.model.generator.mot.small_action_optimization_test import make_layer, make_pack
-from cosmos_framework.model.generator.mot.small_action_tower import small_layer_forward
+memory_module = pytest.importorskip("cosmos_framework.model.generator.mot.inference_small_action_memory")
+SmallActionMemoryState = memory_module.SmallActionMemoryState
+helpers = pytest.importorskip("cosmos_framework.model.generator.mot.small_action_optimization_test")
+make_layer, make_pack = helpers.make_layer, helpers.make_pack
+small_layer_forward = pytest.importorskip("cosmos_framework.model.generator.mot.small_action_tower").small_layer_forward
 
 spec = importlib.util.spec_from_file_location(
     "pwm_cache", Path(__file__).resolve().parents[4] / "vllm_omni/diffusion/models/pwm_wam/und_cache.py"
