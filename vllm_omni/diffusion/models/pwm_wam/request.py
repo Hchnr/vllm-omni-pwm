@@ -63,6 +63,10 @@ def canvas_seam(roles, layout, height, width):
 
 
 def prepare_request(raw: dict, spec: dict) -> PwmRequest:
+    if not isinstance(raw, dict):
+        raise ValueError("WAM request must be an object")
+    if raw.get("action_path") is not None:
+        raise ValueError("Native no-state WAM does not accept action conditioning")
     if raw.get("model_mode") != "wam":
         raise ValueError("Native PWM requires model_mode='wam'")
     for flag in ("autoregressive", "enable_sound", "native_prompt_upsampling"):
@@ -72,7 +76,10 @@ def prepare_request(raw: dict, spec: dict) -> PwmRequest:
         raise ValueError("Native WAM requires one Action128 output per request")
     if raw.get("condition_frame_indexes_vision") not in (None, [0]):
         raise ValueError("Native WAM conditions on vision frame zero only")
-    ext = copy.deepcopy(raw.get("extra", {}).get("action128", {}))
+    extra = raw.get("extra", {})
+    if not isinstance(extra, dict) or not isinstance(extra.get("action128", {}), dict):
+        raise ValueError("extra.action128 must be an object")
+    ext = copy.deepcopy(extra.get("action128", {}))
     allowed = {
         "action_domain",
         "action_dim_mask",

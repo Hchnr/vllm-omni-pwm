@@ -141,14 +141,25 @@ class PwmThreeTowerLayer(nn.Module):
             action_width, action_intermediate, heads=heads, kv_heads=kv_heads, dim=dim
         )
 
-    def forward(self, streams: Streams, rope: tuple[Rope, Rope, Rope], action_rope: tuple[Rope, Rope, Rope]) -> Streams:
+    def forward(
+        self,
+        streams: Streams,
+        rope: tuple[Rope, Rope, Rope],
+        action_rope: tuple[Rope, Rope, Rope],
+        und_cache: list[tuple[Tensor, Tensor, Tensor]] | None = None,
+    ) -> Streams:
         und, video, action = streams
         attn, act = self.self_attn, self.action_block_moe_gen_action
-        qu, ku, vu = attn.project(self.input_layernorm(und))
+        cached = und_cache is not None and len(und_cache) != 0
+        if cached:
+            und_output, ku, vu = und_cache[0]
+        else:
+            qu, ku, vu = attn.project(self.input_layernorm(und))
         qv, kv, vv = attn.project(self.input_layernorm_moe_gen(video), "_moe_gen")
         qa, ka, va = act.project(act.input_layernorm(action))
         keys, values = (ku, kv, ka), (vu, vv, va)
-        yu = attention(rotate(qu, rope[0]), rotate(ku, rope[0]), vu, causal=True, backend=self.attention_backend)
+        if not cached:
+            yu = attention(rotate(qu, rope[0]), rotate(ku, rope[0]), vu, causal=True, backend=self.attention_backend)
         yv = attention(
             rotate(qv, rope[1]),
             torch.cat([rotate(k, r) for k, r in zip(keys, rope)]),
@@ -163,8 +174,13 @@ class PwmThreeTowerLayer(nn.Module):
         )
         action = action + act.o_proj(ya)
         action = action + act.mlp(act.post_attention_layernorm(action))
-        und = und + attn.o_proj(yu)
-        und = und + self.mlp(self.post_attention_layernorm(und))
+        if cached:
+            und = und_output
+        else:
+            und = und + attn.o_proj(yu)
+            und = und + self.mlp(self.post_attention_layernorm(und))
+            if und_cache is not None:
+                und_cache.append((und, ku, vu))
         video = video + attn.o_proj_moe_gen(yv)
         video = video + self.mlp_moe_gen(self.post_attention_layernorm_moe_gen(video))
         return und, video, action
@@ -325,9 +341,13 @@ class PwmWamTransformer(nn.Module):
         return velocity, self.llm2action(streams[2], projection_ids)
 
     def forward_hidden(
-        self, streams: Streams, rope: tuple[Rope, Rope, Rope], action_rope: tuple[Rope, Rope, Rope]
+        self,
+        streams: Streams,
+        rope: tuple[Rope, Rope, Rope],
+        action_rope: tuple[Rope, Rope, Rope],
+        und_cache: list[list[tuple[Tensor, Tensor, Tensor]]] | None = None,
     ) -> Streams:
-        for layer in self.language_model.model.layers:
-            streams = layer(streams, rope, action_rope)
+        for index, layer in enumerate(self.language_model.model.layers):
+            streams = layer(streams, rope, action_rope, None if und_cache is None else und_cache[index])
         stack = self.language_model.model
         return stack.norm(streams[0]), stack.norm_moe_gen(streams[1]), stack.norm_moe_gen_action(streams[2])

@@ -29,6 +29,8 @@ def compare(reference, actual):
     references = {}
     for run in reference["runs"]:
         references.setdefault(run["request_index"], run["output"])
+    if set(references) != {run["request_index"] for run in actual["runs"]}:
+        raise ValueError("Missing or unexpected request index in candidate")
     checks = []
     for run in actual["runs"]:
         expected = references[run["request_index"]]
@@ -93,7 +95,14 @@ def main():
     comparable = all(key in ra and ra[key] == ca.get(key) for key in keys)
     comparable = comparable and ra.get("warmup", 0) >= 2 and ra.get("repeats", 0) >= 3
     comparable = comparable and reference.get("cuda_visible_devices") == candidate.get("cuda_visible_devices")
+    comparable = comparable and len(reference["runs"]) == len(candidate["runs"])
+    for key in ("input_sha256", "input_asset_sha256"):
+        comparable = comparable and key in reference and reference[key] == candidate.get(key)
     result["timing_comparable"] = comparable
+    result["timing_caveat"] = (
+        "Matching configuration does not establish GPU exclusivity. Inspect gpu_processes_before/after; "
+        "co-tenant activity invalidates an exclusive-hardware performance claim."
+    )
     result["speedup"] = (result["baseline_median_seconds"] / result["candidate_median_seconds"]) if comparable else None
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

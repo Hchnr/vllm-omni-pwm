@@ -28,7 +28,7 @@ class PwmWamNativePipeline(nn.Module):
         if od_config.step_execution or od_config.max_num_seqs != 1:
             raise ValueError("Native PWM requires request execution with max_num_seqs=1")
         if not od_config.enforce_eager:
-            raise ValueError("Set enforce_eager=True; use pwm_compile for validated transformer-only compilation")
+            raise ValueError("Set enforce_eager=True; pwm_compile is experimental transformer-only compilation")
         if (
             od_config.enable_sleep_mode
             or od_config.enable_cpu_offload
@@ -52,6 +52,7 @@ class PwmWamNativePipeline(nn.Module):
             tokenizer_path=config["pwm_tokenizer_path"],
             attention_backend=config.get("pwm_attention_backend", "sdpa"),
             compile_layers=config.get("pwm_compile", False),
+            cache_und=config.get("pwm_native_und_cache", False),
         )
         self._loaded_parameters = set(dict(self.named_parameters()))
 
@@ -76,7 +77,7 @@ class PwmWamNativePipeline(nn.Module):
         raw["guidance"] = params.guidance_scale
         try:
             result, video, fps = self.runtime(raw)
-        except (ValueError, TypeError, KeyError) as exc:
+        except (ValueError, TypeError, KeyError, OSError) as exc:
             raise OmniClientError(str(exc)) from exc
         payload = {"actions": result.pop("action")}
         metadata = {"actions": result}

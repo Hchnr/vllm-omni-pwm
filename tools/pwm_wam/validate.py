@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reference-config", type=Path)
     parser.add_argument("--native", action="store_true")
+    parser.add_argument("--native-und-cache", action="store_true")
     parser.add_argument("--vae", type=Path)
     parser.add_argument("--tokenizer", type=Path)
     parser.add_argument("--attention-backend", choices=("flash3", "sdpa"), default="flash3")
@@ -138,6 +139,7 @@ def main():
                     "pwm_python": str(args.python),
                     "pwm_cosmos_root": str(args.cosmos_root),
                     "pwm_compile": args.compile,
+                    "pwm_native_und_cache": args.native_und_cache,
                     "pwm_reuse_und": args.reuse_und,
                     "pwm_projected_und": args.projected_und,
                     "pwm_precision": args.precision,

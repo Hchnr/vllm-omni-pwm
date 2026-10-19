@@ -57,3 +57,10 @@ def test_changed_seed_rejected():
     actual["runs"][0]["output"]["seed"] = 43
     with pytest.raises(ValueError, match="seed"):
         comparison.compare(sample(), actual)
+
+
+def test_missing_request_rejected():
+    expected = sample()
+    expected["runs"].append({**expected["runs"][0], "request_index": 1})
+    with pytest.raises(ValueError, match="Missing"):
+        comparison.compare(expected, sample())
