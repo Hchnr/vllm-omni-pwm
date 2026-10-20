@@ -43,6 +43,8 @@ class PwmWamRuntime(nn.Module):
         graph_max_entries=4,
         vae_fastpath="none",
         cfg_parallel=False,
+        load_mode="serial",
+        approx_cache_threshold=0.0,
     ):
         super().__init__()
         if attention_backend not in ("sdpa", "flash3", "flash3_nv"):
@@ -58,12 +60,16 @@ class PwmWamRuntime(nn.Module):
         self.cache_und = cache_und
         self.validation_deterministic = validation_deterministic
         self.cfg_parallel = PwmCfgParallel() if cfg_parallel else None
+        self.approx_cache_threshold = approx_cache_threshold
+        self.last_approx_report = None
+        if approx_cache_threshold and (cuda_graph or cfg_parallel):
+            raise ValueError("PWM approximate velocity cache cannot combine with Graph or CFG2")
         if validation_deterministic:
             configure_validation(0)
         self.device = device
         config = json.loads((checkpoint / "config.json").read_text())["model"]["config"]
         self.spec = config["action128_spec"]
-        self.transformer = PwmWamTransformer.from_pretrained(checkpoint, device=device)
+        self.transformer = PwmWamTransformer.from_pretrained(checkpoint, device=device, load_mode=load_mode)
         self.optimization_info = dict(
             fuse_gate_up=fuse_gate_up,
             fuse_qkv=fuse_qkv,
@@ -72,6 +78,9 @@ class PwmWamRuntime(nn.Module):
             graph_max_entries=graph_max_entries,
             vae_fastpath=vae_fastpath,
             cfg_parallel_size=2 if cfg_parallel else 1,
+            load_mode=load_mode,
+            approx_cache_threshold=approx_cache_threshold,
+            loading=self.transformer.load_info,
         )
         if fuse_gate_up or fuse_qkv:
             self.transformer.configure_fusions(gate_up=fuse_gate_up, qkv=fuse_qkv)
@@ -199,9 +208,14 @@ class PwmWamRuntime(nn.Module):
         )
         scheduler.set_timesteps(request.steps, device=self.device, shift=request.shift)
         generator = torch.Generator(device=self.device).manual_seed(request.seed)
-        for timestep in scheduler.timesteps:
+        approximate = None
+        if self.approx_cache_threshold:
+            from .approx_cache import PwmVelocityCache
 
-            def velocity(branch):
+            approximate = PwmVelocityCache(video_threshold=self.approx_cache_threshold)
+        for step_index, timestep in enumerate(scheduler.timesteps):
+
+            def compute_velocity(branch):
                 ids, rope, action_rope, cache, attention_metadata = branch
                 streams = self.transformer.encode_inputs(
                     ids,
@@ -217,28 +231,41 @@ class PwmWamRuntime(nn.Module):
                 vv, va = self.transformer.decode_outputs(hidden, tuple(video.shape), projection, video_indices)
                 return torch.cat((vv.flatten(), va.flatten()))
 
+            def velocity(branch_index):
+                if approximate is None:
+                    return compute_velocity(branches[branch_index])
+                return approximate.run(
+                    lambda: compute_velocity(branches[branch_index]),
+                    latent[:video_size].reshape(video.shape),
+                    latent[video_size:].reshape(action.shape),
+                    branch=branch_index,
+                    step=step_index,
+                    total_steps=request.steps,
+                )
+
             needs_cfg = request.guidance != 1
             if request.guidance_interval is not None:
                 lo, hi = request.guidance_interval
                 needs_cfg = needs_cfg and lo < timestep.item() < hi
             if self.cfg_parallel is not None:
                 predicted = self.cfg_parallel.predict(
-                    lambda branch_index: velocity(branches[branch_index]),
+                    velocity,
                     needs_cfg=needs_cfg,
                     guidance=request.guidance,
                     normalize=request.normalize_cfg,
                 )
             elif needs_cfg:
-                conditional = velocity(branches[0])
-                unconditional = velocity(branches[1])
+                conditional = velocity(0)
+                unconditional = velocity(1)
                 predicted = unconditional + request.guidance * (conditional - unconditional)
                 if request.normalize_cfg:
                     predicted = predicted * (torch.norm(conditional) / (torch.norm(predicted) + 1e-8)).clamp(0, 1)
             else:
-                predicted = velocity(branches[0])
+                predicted = velocity(0)
             latent = scheduler.step(
                 model_output=predicted, timestep=timestep, sample=latent[None], generator=generator, return_dict=False
             )[0].squeeze(0)
+        self.last_approx_report = approximate.report() if approximate is not None else None
         return latent[:video_size].reshape(video.shape), latent[video_size:].reshape(action.shape)
 
     @torch.inference_mode()
@@ -269,8 +296,8 @@ class PwmWamRuntime(nn.Module):
 
         if not 1 <= len(raws) <= 4:
             raise ValueError("PWM fixed compute batching supports 1--4 requests")
-        if self.graph_runner is not None or self.cfg_parallel is not None:
-            raise ValueError("PWM fixed compute batching cannot combine with Graph or CFG2")
+        if self.graph_runner is not None or self.cfg_parallel is not None or self.approx_cache_threshold:
+            raise ValueError("PWM fixed compute batching cannot combine with Graph, CFG2 or approximate cache")
         started = time.perf_counter()
         requests = [prepare_request(raw, self.spec) for raw in raws]
         reproducibility = [
@@ -320,6 +347,8 @@ class PwmWamRuntime(nn.Module):
         frames = None
         if reproducibility is not None:
             result["reproducibility"] = reproducibility
+        if self.last_approx_report is not None:
+            result["approx_cache"] = self.last_approx_report
         if request.return_video:
             mean, inverse = self.vae_scale()
             decoded = self.vae.decode((video[None].to(torch.bfloat16) / inverse) + mean, return_dict=False)[0]

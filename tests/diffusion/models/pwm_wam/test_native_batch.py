@@ -69,6 +69,7 @@ class _Runtime:
         self.cache_und = cache_und
         self.graph_runner = None
         self.cfg_parallel = None
+        self.approx_cache_threshold = 0.0
 
     def text_ids(self, caption):
         return torch.tensor([1, *(ord(char) % 29 + 2 for char in caption), 2], dtype=torch.long)

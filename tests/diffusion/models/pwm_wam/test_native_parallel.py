@@ -146,6 +146,7 @@ def test_runtime_cfg2_matches_sequential_unipc_and_halves_branch_calls():
         result.attention_backend = "sdpa"
         result.cfg_parallel = parallel
         result.graph_runner = None
+        result.approx_cache_threshold = 0.0
         result.transformer = Transformer()
         result.text_ids = lambda caption: torch.tensor([0 if caption == "positive" else 1])
         return result
