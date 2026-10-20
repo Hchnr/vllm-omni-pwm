@@ -8,6 +8,7 @@ Run with CUDA_VISIBLE_DEVICES set to physical GPU(s) 0--3 only.
 """
 
 import argparse
+import atexit
 import hashlib
 import importlib.metadata
 import json
@@ -33,6 +34,8 @@ def main():
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--save-video", action="store_true")
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--batch-size", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument("--check-batch-isolation", action="store_true")
     args = parser.parse_args()
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not visible or any(x not in ("0", "1", "2", "3") for x in visible.split(",")):
@@ -46,6 +49,27 @@ def main():
     from vllm_omni.diffusion.models.pwm_wam.runtime import PwmWamRuntime
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    monitor_file = args.output.with_suffix(".gpu.csv").open("w")
+    monitor = subprocess.Popen(
+        [
+            "nvidia-smi",
+            "-i",
+            visible,
+            "--query-gpu=timestamp,index,uuid,clocks.sm,temperature.gpu,power.draw,memory.used,utilization.gpu",
+            "--format=csv",
+            "-lms",
+            "1000",
+        ],
+        stdout=monitor_file,
+        stderr=subprocess.DEVNULL,
+    )
+
+    def close_monitor():
+        monitor.terminate()
+        monitor.wait(timeout=10)
+        monitor_file.close()
+
+    atexit.register(close_monitor)
     diff = subprocess.check_output(["git", "diff", "HEAD", "--"], text=True)
     args.output.with_suffix(".diff").write_text(diff)
     options = dict(attention_backend="flash3", compile_layers=True, cache_und=True, validation_deterministic=True)
@@ -56,6 +80,7 @@ def main():
     record = dict(
         boundary="synchronized native runtime whole request; excludes engine/HTTP",
         options=options,
+        batch_size=args.batch_size,
         checkpoint=str(args.checkpoint.resolve()),
         input=[str(p.resolve()) for p in args.input],
         input_sha256=[sha256(p) for p in args.input],
@@ -96,12 +121,16 @@ def main():
     torch.accelerator.reset_peak_memory_stats()
     for repeat in range(args.warmup + args.repeats):
         for i, request in enumerate(requests):
+            batch = [dict(request, seed=request["seed"] + j) for j in range(args.batch_size)]
             torch.accelerator.synchronize()
             started = time.perf_counter()
-            result, frames, fps = model(request)
+            outputs = [model(request)] if args.batch_size == 1 else model.forward_batch(batch)
+            result, frames, fps = outputs[0]
             torch.accelerator.synchronize()
             seconds = time.perf_counter() - started
             row = dict(request_index=i, repetition=repeat - args.warmup, seconds=seconds, output=result)
+            if args.batch_size > 1:
+                row["batch_outputs"] = [output[0] for output in outputs]
             if repeat < args.warmup:
                 record["warmup"].append(dict(request_index=i, seconds=seconds))
             else:
@@ -125,12 +154,19 @@ def main():
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
         ) as prof:
-            model(requests[0])
+            if args.batch_size == 1:
+                model(requests[0])
+            else:
+                model.forward_batch([dict(requests[0], seed=requests[0]["seed"] + j) for j in range(args.batch_size)])
             torch.accelerator.synchronize()
         prof.export_chrome_trace(str(args.output.with_suffix(".trace.json")))
         args.output.with_suffix(".profile.txt").write_text(
             prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=60)
         )
+    if args.check_batch_isolation and args.batch_size > 1:
+        record["serial_isolation_references"] = [
+            [model(dict(request, seed=request["seed"] + j))[0] for j in range(args.batch_size)] for request in requests
+        ]
     record["finished_at"] = time.time()
     args.output.write_text(json.dumps(record, indent=2) + "\n")
 

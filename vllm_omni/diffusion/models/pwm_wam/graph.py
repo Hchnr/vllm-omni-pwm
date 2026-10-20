@@ -203,7 +203,14 @@ class PwmGraphRunner:
                     return self.transformer.forward_hidden(*arguments)
                 if not all(filled):
                     raise ValueError("PWM CUDA Graph cannot capture a partially populated UND cache")
-            key = (self._branch(und_cache), _signature(arguments))
+            precision = (
+                torch.is_autocast_enabled("cuda"),
+                torch.get_autocast_dtype("cuda"),
+                torch.get_float32_matmul_precision(),
+                torch.backends.cudnn.allow_tf32,
+                torch.are_deterministic_algorithms_enabled(),
+            )
+            key = (self._branch(und_cache), precision, _signature(arguments))
             source = _sources(arguments[1:])
             entry = self.entries.get(key)
             if entry is None:

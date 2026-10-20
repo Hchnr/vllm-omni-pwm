@@ -289,3 +289,6 @@ lance_compare/
 
 # Linting binaries downloaded by local pre-commit hooks
 shellcheck*/
+
+# Local PWM optimization evidence (weights, traces, source snapshots and videos).
+/artifacts/optimization/
