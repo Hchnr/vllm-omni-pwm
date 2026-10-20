@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import traceback
+from contextlib import nullcontext
 from pathlib import Path
 
 
@@ -115,7 +116,14 @@ def main():
                         if prepared.return_video and args.transport_dir is None:
                             raise ValueError("Video delivery requires a worker transport directory")
                         batch = misc.to(batch, device="cuda")
-                        with torch.inference_mode():
+                        # Multi-domain shapes require more than Dynamo's default
+                        # eight variants. Scope the same capacity as the native path.
+                        limits = (
+                            torch._dynamo.config.patch(recompile_limit=512, accumulated_recompile_limit=4096)
+                            if args.compile
+                            else nullcontext()
+                        )
+                        with torch.inference_mode(), limits:
                             samples = model.generate_samples_from_batch(
                                 batch,
                                 seed=[prepared.seed],

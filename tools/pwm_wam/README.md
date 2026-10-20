@@ -291,3 +291,32 @@ with the exact same fixture inputs give 5.81/5.75 ms. There is no substantial
 version or layer-implementation advantage in this limited local probe.
 Evidence: `layer_profile_torch{213_before,210,213_after}_1020.json` and
 `reference_layer_profile_1020.json`. No claim is made for other shapes or layers.
+
+### Joint numerical and video validation
+
+Cross-backend bitwise identity is not an acceptance requirement. Use
+`validate.py --deterministic --save-videos <directory>` with
+`PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8` set before startup. Each result
+records effective RNG and deterministic settings. External FA3 kernels still
+need empirical same-seed repeat checks; PyTorch flags alone do not guarantee
+cross-version reproducibility. Independent engines must use distinct
+`MASTER_PORT` values as well as distinct allowed `CUDA_VISIBLE_DEVICES`.
+
+Run every input at least twice with the same seed and add matched inputs with
+another seed. Compare raw decoded frames, not compressed review MP4 files:
+
+```bash
+python tools/pwm_wam/review_video.py \
+  --reference artifacts/validation/quality_1020/reference.json \
+  --candidate artifacts/validation/quality_1020/native_cached.json \
+    artifacts/validation/quality_1020/native_uncached.json \
+  --output-dir artifacts/validation/quality_1020/review
+```
+
+The report includes active-slot action errors, same-seed repeatability,
+cross-backend video RMSE/PSNR/SSIM, temporal-delta differences, and reference
+seed variation. A contact sheet and video gallery support visual review.
+Similarity metrics are diagnostics, not proof of task success; the tool leaves
+visual assessment pending. Existing action thresholds remain visible warnings,
+and domain/units/mask/finite-value contracts remain mandatory. Quality runs
+include video decoding and are not action-only performance measurements.
