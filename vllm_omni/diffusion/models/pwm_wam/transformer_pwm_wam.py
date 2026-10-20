@@ -22,6 +22,43 @@ Rope = tuple[Tensor, Tensor]
 Streams = tuple[Tensor, Tensor, Tensor]
 
 
+def _linear_with_weight(weight: Tensor, *, requires_grad: bool) -> nn.Linear:
+    """Build a linear without allocating an unused initialization tensor."""
+    linear = nn.Linear(weight.shape[1], weight.shape[0], bias=False, device="meta", dtype=weight.dtype)
+    linear.weight = nn.Parameter(weight, requires_grad=requires_grad)
+    return linear
+
+
+def _pack_linears(owner: nn.Module, names: tuple[str, ...], packed_name: str) -> None:
+    """Move projections to one weight allocation, retaining no dense copies."""
+    linears = [getattr(owner, name) for name in names]
+    first = linears[0].weight
+    if first.is_meta:
+        raise ValueError("PWM projection fusion requires loaded weights")
+    if any(
+        linear.bias is not None
+        or linear.weight.shape[1] != first.shape[1]
+        or linear.weight.dtype != first.dtype
+        or linear.weight.device != first.device
+        or linear.weight.requires_grad != first.requires_grad
+        for linear in linears
+    ):
+        raise ValueError("PWM fusion requires compatible bias-free projection weights")
+    with torch.no_grad():
+        weight = torch.cat([linear.weight for linear in linears], dim=0)
+    setattr(owner, packed_name, _linear_with_weight(weight, requires_grad=first.requires_grad))
+    for name in names:
+        delattr(owner, name)
+
+
+def _unpack_linear(owner: nn.Module, names: tuple[str, ...], sizes: tuple[int, ...], packed_name: str) -> None:
+    """Restore original projection names using views of the packed storage."""
+    packed = getattr(owner, packed_name)
+    for name, weight in zip(names, packed.weight.detach().split(sizes, dim=0), strict=True):
+        setattr(owner, name, _linear_with_weight(weight, requires_grad=packed.weight.requires_grad))
+    setattr(owner, packed_name, None)
+
+
 class PwmRMSNorm(nn.Module):
     def __init__(self, width: int, eps: float = 1e-6):
         super().__init__()
@@ -110,8 +147,19 @@ class PwmMLP(nn.Module):
         self.gate_proj = nn.Linear(width, intermediate, bias=False)
         self.up_proj = nn.Linear(width, intermediate, bias=False)
         self.down_proj = nn.Linear(intermediate, width, bias=False)
+        self.gate_up_proj = None
+
+    def configure_gate_up_fusion(self, enabled: bool) -> None:
+        if enabled and self.gate_up_proj is None:
+            _pack_linears(self, ("gate_proj", "up_proj"), "gate_up_proj")
+        elif not enabled and self.gate_up_proj is not None:
+            intermediate = self.down_proj.in_features
+            _unpack_linear(self, ("gate_proj", "up_proj"), (intermediate, intermediate), "gate_up_proj")
 
     def forward(self, x: Tensor) -> Tensor:
+        if self.gate_up_proj is not None:
+            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+            return self.down_proj(F.silu(gate) * up)
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
@@ -119,6 +167,7 @@ class PwmAttentionWeights(nn.Module):
     def __init__(self, width: int, *, video: bool = False, heads: int = 32, kv_heads: int = 8, dim: int = 128):
         super().__init__()
         self.heads, self.kv_heads, self.dim = heads, kv_heads, dim
+        self.qkv_proj_moe_gen = None
         for suffix in ("", "_moe_gen") if video else ("",):
             for name, output in (("q_proj", heads * dim), ("k_proj", kv_heads * dim), ("v_proj", kv_heads * dim)):
                 setattr(self, name + suffix, nn.Linear(width, output, bias=False))
@@ -126,10 +175,25 @@ class PwmAttentionWeights(nn.Module):
             setattr(self, "q_norm" + suffix, PwmRMSNorm(dim))
             setattr(self, "k_norm" + suffix, PwmRMSNorm(dim))
 
+    def configure_video_qkv_fusion(self, enabled: bool) -> None:
+        names = ("q_proj_moe_gen", "k_proj_moe_gen", "v_proj_moe_gen")
+        if enabled and self.qkv_proj_moe_gen is None:
+            _pack_linears(self, names, "qkv_proj_moe_gen")
+        elif not enabled and self.qkv_proj_moe_gen is not None:
+            sizes = (self.heads * self.dim, self.kv_heads * self.dim, self.kv_heads * self.dim)
+            _unpack_linear(self, names, sizes, "qkv_proj_moe_gen")
+
     def project(self, x: Tensor, suffix: str = "", *, normalize_key: bool = True) -> tuple[Tensor, Tensor, Tensor]:
-        q = getattr(self, "q_proj" + suffix)(x).view(-1, self.heads, self.dim)
-        k = getattr(self, "k_proj" + suffix)(x).view(-1, self.kv_heads, self.dim)
-        v = getattr(self, "v_proj" + suffix)(x).view(-1, self.kv_heads, self.dim)
+        if suffix == "_moe_gen" and self.qkv_proj_moe_gen is not None:
+            sizes = (self.heads * self.dim, self.kv_heads * self.dim, self.kv_heads * self.dim)
+            q, k, v = self.qkv_proj_moe_gen(x).split(sizes, dim=-1)
+        else:
+            q = getattr(self, "q_proj" + suffix)(x)
+            k = getattr(self, "k_proj" + suffix)(x)
+            v = getattr(self, "v_proj" + suffix)(x)
+        q = q.reshape(-1, self.heads, self.dim)
+        k = k.reshape(-1, self.kv_heads, self.dim)
+        v = v.reshape(-1, self.kv_heads, self.dim)
         key = getattr(self, "k_norm" + suffix)(k) if normalize_key else k
         return getattr(self, "q_norm" + suffix)(q), key, v
 
@@ -170,6 +234,11 @@ class PwmThreeTowerLayer(nn.Module):
         self.action_block_moe_gen_action = PwmActionBlock(
             action_width, action_intermediate, heads=heads, kv_heads=kv_heads, dim=dim
         )
+
+    def configure_fusions(self, *, gate_up: bool = False, qkv: bool = False) -> None:
+        """Select VIDEO projections before compilation, leaving UND/ACTION intact."""
+        self.mlp_moe_gen.configure_gate_up_fusion(gate_up)
+        self.self_attn.configure_video_qkv_fusion(qkv)
 
     def forward(
         self,
@@ -298,6 +367,18 @@ class PwmWamTransformer(nn.Module):
         self.llm2action = PwmDomainLinear(1280, 128)
         self.action_modality_embed = nn.Parameter(torch.zeros(1280))
         self.action_normalization = PwmNormalizationBuffers(num_domains)
+
+    def configure_fusions(self, *, gate_up: bool = False, qkv: bool = False) -> None:
+        """Configure loaded weights before compiling layers or serving requests.
+
+        HF loading always validates the original parameter tree first. Fusion
+        packs only VIDEO projections and changes their runtime state_dict keys;
+        disable both options to recover the original checkpoint layout. Packed
+        weights replace the original allocations. Disabling uses split views,
+        so neither mode keeps a second dense copy of the weights.
+        """
+        for layer in self.language_model.model.layers:
+            layer.configure_fusions(gate_up=gate_up, qkv=qkv)
 
     @classmethod
     def from_pretrained(cls, path: Path, *, device: str = "cuda", dtype: torch.dtype = torch.bfloat16):
