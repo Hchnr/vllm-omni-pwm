@@ -16,6 +16,7 @@ from transformers import AutoTokenizer
 
 from vllm_omni.diffusion.models.schedulers.scheduling_flow_unipc_multistep import FlowUniPCMultistepScheduler
 
+from .parallel import PwmCfgParallel
 from .positions import position_ids, rotary
 from .reproducibility import configure_validation
 from .request import PwmRequest, prepare_request
@@ -35,6 +36,13 @@ class PwmWamRuntime(nn.Module):
         compile_layers=False,
         cache_und=False,
         validation_deterministic=False,
+        fuse_gate_up=False,
+        fuse_qkv=False,
+        fp8_scope="none",
+        cuda_graph=False,
+        graph_max_entries=4,
+        vae_fastpath="none",
+        cfg_parallel=False,
     ):
         super().__init__()
         if attention_backend not in ("sdpa", "flash3", "flash3_nv"):
@@ -49,12 +57,28 @@ class PwmWamRuntime(nn.Module):
         self.attention_backend = attention_backend
         self.cache_und = cache_und
         self.validation_deterministic = validation_deterministic
+        self.cfg_parallel = PwmCfgParallel() if cfg_parallel else None
         if validation_deterministic:
             configure_validation(0)
         self.device = device
         config = json.loads((checkpoint / "config.json").read_text())["model"]["config"]
         self.spec = config["action128_spec"]
         self.transformer = PwmWamTransformer.from_pretrained(checkpoint, device=device)
+        self.optimization_info = dict(
+            fuse_gate_up=fuse_gate_up,
+            fuse_qkv=fuse_qkv,
+            fp8_scope=fp8_scope,
+            cuda_graph=cuda_graph,
+            graph_max_entries=graph_max_entries,
+            vae_fastpath=vae_fastpath,
+            cfg_parallel_size=2 if cfg_parallel else 1,
+        )
+        if fuse_gate_up or fuse_qkv:
+            self.transformer.configure_fusions(gate_up=fuse_gate_up, qkv=fuse_qkv)
+        if fp8_scope != "none":
+            from .optimization_linear import install_video_fp8
+
+            self.optimization_info["fp8"] = install_video_fp8(self.transformer, scope=fp8_scope)
         for layer in self.transformer.language_model.model.layers:
             layer.attention_backend = attention_backend
         if compile_layers:
@@ -62,6 +86,11 @@ class PwmWamRuntime(nn.Module):
                 self.transformer.language_model.model.layers[index] = torch.compile(
                     layer, fullgraph=True, dynamic=False
                 )
+        self.graph_runner = None
+        if cuda_graph:
+            from .graph import PwmGraphRunner
+
+            self.graph_runner = PwmGraphRunner(self.transformer, max_entries=graph_max_entries)
         contract = dict(
             action128_spec=self.spec,
             vision_spatial_position_mode="action128_seam",
@@ -90,6 +119,10 @@ class PwmWamRuntime(nn.Module):
         self.vae = vae.to(device).eval()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
         preserve_checkpoint_rms(self.vae)
+        if vae_fastpath != "none":
+            from .vae import install_pwm_vae_fastpath
+
+            self.optimization_info["vae"] = install_pwm_vae_fastpath(self.vae, scope=vae_fastpath)
         self.eval()
 
     def text_ids(self, caption: str):
@@ -132,6 +165,8 @@ class PwmWamRuntime(nn.Module):
             np.random.RandomState(request.seed).standard_normal((request.action_length, 128)).astype(np.float32)
         ).to(self.device)
         latent = torch.cat((video.flatten(), action.flatten()))
+        if self.cfg_parallel is not None:
+            latent = self.cfg_parallel.synchronize_latent(latent)
         video_size = video.numel()
         video_indices = torch.arange(1, video.shape[1], device=self.device)
         action_indices = torch.arange(request.action_length, device=self.device)
@@ -177,22 +212,30 @@ class PwmWamRuntime(nn.Module):
                     video_indices,
                     action_indices,
                 )
-                hidden = self.transformer.forward_hidden(streams, rope, action_rope, cache, attention_metadata)
+                forward_hidden = self.transformer.forward_hidden if self.graph_runner is None else self.graph_runner.run
+                hidden = forward_hidden(streams, rope, action_rope, cache, attention_metadata)
                 vv, va = self.transformer.decode_outputs(hidden, tuple(video.shape), projection, video_indices)
                 return torch.cat((vv.flatten(), va.flatten()))
 
-            conditional = velocity(branches[0])
             needs_cfg = request.guidance != 1
             if request.guidance_interval is not None:
                 lo, hi = request.guidance_interval
                 needs_cfg = needs_cfg and lo < timestep.item() < hi
-            if needs_cfg:
+            if self.cfg_parallel is not None:
+                predicted = self.cfg_parallel.predict(
+                    lambda branch_index: velocity(branches[branch_index]),
+                    needs_cfg=needs_cfg,
+                    guidance=request.guidance,
+                    normalize=request.normalize_cfg,
+                )
+            elif needs_cfg:
+                conditional = velocity(branches[0])
                 unconditional = velocity(branches[1])
                 predicted = unconditional + request.guidance * (conditional - unconditional)
                 if request.normalize_cfg:
                     predicted = predicted * (torch.norm(conditional) / (torch.norm(predicted) + 1e-8)).clamp(0, 1)
             else:
-                predicted = conditional
+                predicted = velocity(branches[0])
             latent = scheduler.step(
                 model_output=predicted, timestep=timestep, sample=latent[None], generator=generator, return_dict=False
             )[0].squeeze(0)
@@ -211,8 +254,12 @@ class PwmWamRuntime(nn.Module):
             if self.compile_layers
             else nullcontext()
         )
-        with limits:
-            video, normalized = self.sample(request, clean)
+        try:
+            with limits:
+                video, normalized = self.sample(request, clean)
+        finally:
+            if self.graph_runner is not None:
+                self.graph_runner.end_request()
         normalized = normalized.float()
         normalizer = self.transformer.action_normalization
         domain = request.normalization_id

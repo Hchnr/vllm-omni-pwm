@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Native single-GPU Action128 pipeline executed inside the Omni worker."""
+"""Native Action128 pipeline with single-GPU and experimental CFG2 execution."""
 
 from collections.abc import Iterable
 from pathlib import Path
@@ -11,6 +11,7 @@ from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 from vllm_omni.errors import OmniClientError
 
+from .optimization_config import PwmOptimizationConfig
 from .runtime import PwmWamRuntime
 
 
@@ -23,8 +24,9 @@ class PwmWamNativePipeline(nn.Module):
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__()
-        if od_config.parallel_config.world_size != 1:
-            raise ValueError("Native PWM currently supports one GPU per worker")
+        cfg_size = od_config.parallel_config.cfg_parallel_size
+        if cfg_size not in (1, 2) or od_config.parallel_config.world_size != cfg_size:
+            raise ValueError("Native PWM supports one GPU or two CFG-only ranks; TP/SP/PP are not supported")
         if od_config.step_execution or od_config.max_num_seqs != 1:
             raise ValueError("Native PWM requires request execution with max_num_seqs=1")
         if not od_config.enforce_eager:
@@ -43,6 +45,8 @@ class PwmWamNativePipeline(nn.Module):
             raise ValueError("Native PWM does not support generic diffusion caches")
         config = od_config.model_config
         experimental = config.get("pwm_experimental_backend", False)
+        if cfg_size == 2 and not experimental:
+            raise ValueError("PWM CFG2 requires pwm_experimental_backend")
         if not experimental and config.get("pwm_attention_backend", "sdpa") != "sdpa":
             raise ValueError("Native PWM defaults to SDPA only; FA3 requires pwm_experimental_backend")
         if not experimental and config.get("pwm_compile", False):
@@ -51,6 +55,11 @@ class PwmWamNativePipeline(nn.Module):
             raise ValueError("Native PWM currently supports BF16 only")
         if config.get("pwm_reuse_und") or config.get("pwm_projected_und"):
             raise ValueError("Legacy UND cache flags are not supported; use pwm_native_und_cache")
+        optimization = PwmOptimizationConfig.from_mapping(config.get("pwm_optimization", {}))
+        if optimization != PwmOptimizationConfig() and not experimental:
+            raise ValueError("PWM optimization options require pwm_experimental_backend")
+        if cfg_size == 2 and (optimization.cuda_graph or optimization.fp8_scope != "none"):
+            raise ValueError("PWM CFG2 currently requires CUDA Graph and FP8 to be disabled")
         self.runtime = PwmWamRuntime(
             Path(od_config.model),
             vae_path=config["pwm_vae_path"],
@@ -59,6 +68,8 @@ class PwmWamNativePipeline(nn.Module):
             compile_layers=config.get("pwm_compile", False),
             cache_und=config.get("pwm_native_und_cache", False),
             validation_deterministic=config.get("pwm_validation_deterministic", False),
+            cfg_parallel=cfg_size == 2,
+            **optimization.runtime_kwargs(),
         )
         self._loaded_parameters = set(dict(self.named_parameters()))
 

@@ -30,9 +30,15 @@ class NativeService:
         compile_layers=False,
         experimental_backend=False,
         validation_deterministic=False,
+        optimization=None,
+        cfg_parallel_size=1,
     ):
-        from vllm_omni.diffusion.data import OmniDiffusionConfig
+        from vllm_omni.diffusion.data import DiffusionParallelConfig, OmniDiffusionConfig
         from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
+
+        from .optimization_config import PwmOptimizationConfig
+
+        optimization = PwmOptimizationConfig.from_mapping({} if optimization is None else optimization).runtime_kwargs()
 
         self.output_dir = Path(output_dir).resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -50,7 +56,8 @@ class NativeService:
             "experimental_backend": experimental_backend,
             "native_und_cache": cache_und,
             "validation_deterministic": validation_deterministic,
-            "world_size": 1,
+            "optimization": optimization,
+            "world_size": cfg_parallel_size,
             "max_concurrent_requests": 1,
             "output_dir": str(self.output_dir),
         }
@@ -59,6 +66,7 @@ class NativeService:
                 model=str(checkpoint),
                 model_class_name="PwmWamNativePipeline",
                 enforce_eager=True,
+                parallel_config=DiffusionParallelConfig(cfg_parallel_size=cfg_parallel_size),
                 model_config={
                     "pwm_vae_path": str(vae),
                     "pwm_tokenizer_path": str(tokenizer),
@@ -67,6 +75,7 @@ class NativeService:
                     "pwm_compile": compile_layers,
                     "pwm_experimental_backend": experimental_backend,
                     "pwm_validation_deterministic": validation_deterministic,
+                    "pwm_optimization": optimization,
                 },
             )
         )
@@ -197,6 +206,8 @@ def main():
     parser.add_argument("--deterministic", action="store_true", help="Use strict seeded validation controls")
     parser.add_argument("--warmup-input", type=Path)
     parser.add_argument("--cache-und", action="store_true", help="Enable request-local UND reuse")
+    parser.add_argument("--optimization-config", type=Path, help="JSON native optimization options (experimental)")
+    parser.add_argument("--cfg-parallel-size", type=int, choices=(1, 2), default=1)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8019)
     args = parser.parse_args()
@@ -210,6 +221,8 @@ def main():
         args.attention_backend,
         args.cache_und,
         compile_layers=args.compile,
+        optimization=json.loads(args.optimization_config.read_text()) if args.optimization_config else None,
+        cfg_parallel_size=args.cfg_parallel_size,
         experimental_backend=args.experimental_backend,
         validation_deterministic=args.deterministic,
     )

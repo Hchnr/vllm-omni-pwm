@@ -30,6 +30,10 @@ def main():
     parser.add_argument("--reference-config", type=Path)
     parser.add_argument("--native", action="store_true")
     parser.add_argument("--native-und-cache", action="store_true")
+    parser.add_argument("--cfg-parallel-size", type=int, choices=(1, 2), default=1)
+    parser.add_argument(
+        "--native-options", type=Path, help="JSON PWM optimization options; requires experimental native"
+    )
     parser.add_argument("--experimental-native-backend", action="store_true")
     parser.add_argument("--vae", type=Path)
     parser.add_argument("--tokenizer", type=Path)
@@ -53,6 +57,11 @@ def main():
         parser.error("Native validation requires BF16; use --native-und-cache for native caching")
     if args.native_und_cache and not args.native:
         parser.error("--native-und-cache requires --native")
+    if args.native_options and not (args.native and args.experimental_native_backend):
+        parser.error("--native-options requires --native and --experimental-native-backend")
+    native_options = json.loads(args.native_options.read_text()) if args.native_options else {}
+    if args.cfg_parallel_size != 1 and not (args.native and args.mode == "engine"):
+        parser.error("--cfg-parallel-size=2 requires native engine mode")
     if args.mode == "worker" and args.attention_backend == "flash3_nv":
         parser.error("Reference worker selects NVIDIA FA3 with --attention-backend flash3")
     if args.experimental_native_backend and not args.native:
@@ -180,6 +189,7 @@ def main():
             compile_layers=args.compile,
             cache_und=args.native_und_cache,
             validation_deterministic=args.deterministic,
+            **native_options,
         )
         result["experimental_runtime_only"] = True
         result["runtime"] = {"torch": torch.__version__}
@@ -194,7 +204,7 @@ def main():
         def close():
             pass
     else:
-        from vllm_omni.diffusion.data import OmniDiffusionConfig
+        from vllm_omni.diffusion.data import DiffusionParallelConfig, OmniDiffusionConfig
         from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
         from vllm_omni.diffusion.request import OmniDiffusionRequest
         from vllm_omni.inputs.data import OmniDiffusionSamplingParams
@@ -204,12 +214,14 @@ def main():
                 model=str(args.checkpoint),
                 model_class_name="PwmWamNativePipeline" if args.native else "PwmWamPipeline",
                 enforce_eager=True,
+                parallel_config=DiffusionParallelConfig(cfg_parallel_size=args.cfg_parallel_size),
                 model_config={
                     "pwm_python": str(args.python),
                     "pwm_cosmos_root": str(args.cosmos_root),
                     "pwm_compile": args.compile,
                     "pwm_experimental_backend": args.experimental_native_backend,
                     "pwm_native_und_cache": args.native_und_cache,
+                    "pwm_optimization": native_options,
                     "pwm_validation_deterministic": args.deterministic,
                     "pwm_reuse_und": args.reuse_und,
                     "pwm_projected_und": args.projected_und,
