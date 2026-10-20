@@ -257,11 +257,37 @@ bitwise equal on/off, while joint still fails against Cosmos. Both compiled
 native execution and caching need numerical fixes; tiny cache unit tests do
 not establish full-model equivalence. See `native_fa3_domains_cache_ablation_1020.json`.
 
-Frozen real Q/K/V kernel probes on GPU0 show the bundled FA3 is faster than NV
-FA3 for the tested UND/ACTION/VIDEO shapes. These are isolated kernel results,
-not a percentage of complete-request gain, and provider outputs differ.
+Frozen real Q/K/V operator-call probes on GPU0 show the bundled FA3 is faster than NV
+FA3 for the tested UND/ACTION/VIDEO shapes. These are isolated FA3 call results (CUDA event intervals can include host
+submission gaps),
+not raw kernel-only time or a percentage of complete-request gain, and provider outputs differ.
 Evidence: `fa3_provider_kernel_profile_1020.json`. Compiler/version and framework
 contributions remain unquantified; no scheduler or batching gain is established.
 
 Resource constraint for further task validation: physical GPUs 0–3 only.
 Earlier GPU6 results predate this constraint; no new tests may use GPUs 4–7.
+
+Further GPU0 stage diagnostics use one full LIBERO input, two warmups and five
+instrumented repetitions, with UND caching disabled on both paths. Reference
+worker runtime is 2303.1 ms versus native runtime 2050.4 ms. Network execution
+intervals account for 2043.1 versus 1986.9 ms; the remaining 196.5 ms difference
+is outside those intervals (preparation/sampling/dispatch). This is a runtime
+boundary diagnosis, not a new engine benchmark or an additive breakdown of the
+older shared-GPU 19% result. The output still passes the normalized gate
+(max-abs 0.036085, RMSE 0.009690). See `request_stage_profile_summary_1020.json`.
+
+A concrete implementation difference is the reference's allocation of a full
+41-frame pixel canvas before generic preparation; the native path encodes only
+the first observed frame and constructs the latent directly. The reference
+already limits VAE encoding to the conditioning prefix, so **full-video VAE
+encoding is not the removed work**. Individual preparation operations have not
+been separately ablated. Native VAE encode is not faster in this probe
+(17.64 ms versus 13.28 ms). These are portable inference-path differences,
+not evidence of a vLLM scheduler advantage.
+
+Frozen layer-0/35 replay with identical native code and NV FA3 across Torch
+2.13/2.10/2.13 gives roughly 5.75–5.80 ms per layer; actual Cosmos compiled layers
+with the exact same fixture inputs give 5.81/5.75 ms. There is no substantial
+version or layer-implementation advantage in this limited local probe.
+Evidence: `layer_profile_torch{213_before,210,213_after}_1020.json` and
+`reference_layer_profile_1020.json`. No claim is made for other shapes or layers.
