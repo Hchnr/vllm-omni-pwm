@@ -46,6 +46,8 @@ def main():
     from vllm_omni.diffusion.models.pwm_wam.runtime import PwmWamRuntime
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    diff = subprocess.check_output(["git", "diff", "HEAD", "--"], text=True)
+    args.output.with_suffix(".diff").write_text(diff)
     options = dict(attention_backend="flash3", compile_layers=True, cache_und=True, validation_deterministic=True)
     if args.options:
         options.update(json.loads(args.options.read_text()))
@@ -60,6 +62,7 @@ def main():
         asset_sha256=[sha256(r["vision_path"]) for r in requests],
         revision=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         dirty=subprocess.check_output(["git", "status", "--porcelain"], text=True),
+        diff_sha256=hashlib.sha256(diff.encode()).hexdigest(),
         command=__import__("sys").argv,
         environment={
             k: os.environ.get(k)
