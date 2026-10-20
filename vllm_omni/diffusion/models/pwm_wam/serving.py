@@ -29,6 +29,7 @@ class NativeService:
         *,
         compile_layers=False,
         experimental_backend=False,
+        validation_deterministic=False,
     ):
         from vllm_omni.diffusion.data import OmniDiffusionConfig
         from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
@@ -48,6 +49,7 @@ class NativeService:
             "compile": compile_layers,
             "experimental_backend": experimental_backend,
             "native_und_cache": cache_und,
+            "validation_deterministic": validation_deterministic,
             "world_size": 1,
             "max_concurrent_requests": 1,
             "output_dir": str(self.output_dir),
@@ -64,6 +66,7 @@ class NativeService:
                     "pwm_native_und_cache": cache_und,
                     "pwm_compile": compile_layers,
                     "pwm_experimental_backend": experimental_backend,
+                    "pwm_validation_deterministic": validation_deterministic,
                 },
             )
         )
@@ -191,6 +194,7 @@ def main():
     parser.add_argument("--attention-backend", choices=("sdpa", "flash3", "flash3_nv"), default="sdpa")
     parser.add_argument("--compile", action="store_true", help="Compile each transformer layer")
     parser.add_argument("--experimental-backend", action="store_true")
+    parser.add_argument("--deterministic", action="store_true", help="Use strict seeded validation controls")
     parser.add_argument("--warmup-input", type=Path)
     parser.add_argument("--cache-und", action="store_true", help="Enable request-local UND reuse")
     parser.add_argument("--host", default="127.0.0.1")
@@ -207,6 +211,7 @@ def main():
         args.cache_und,
         compile_layers=args.compile,
         experimental_backend=args.experimental_backend,
+        validation_deterministic=args.deterministic,
     )
     try:
         if args.warmup_input:

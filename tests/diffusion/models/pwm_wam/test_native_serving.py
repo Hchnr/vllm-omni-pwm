@@ -69,3 +69,28 @@ def test_output_files_cannot_escape_root(tmp_path):
     with TestClient(create_app(service)) as client:
         assert client.get("/outputs/clip.mp4").content == b"test-video"
         assert client.get("/outputs/%2e%2e/config.json").status_code == 404
+
+
+def test_service_forwards_deterministic_profile(monkeypatch, tmp_path):
+    import json
+
+    from vllm_omni.diffusion import diffusion_engine
+    from vllm_omni.diffusion.models.pwm_wam.serving import NativeService
+
+    captured = {}
+
+    class EngineStub:
+        def __init__(self, config):
+            captured.update(config.model_config)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(diffusion_engine, "DiffusionEngine", EngineStub)
+    (tmp_path / "config.json").write_text(json.dumps({"model": {"config": {"action128_spec": {}}}}))
+    service = NativeService(tmp_path, "vae", "tokenizer", tmp_path, validation_deterministic=True)
+    try:
+        assert service.info["validation_deterministic"] is True
+        assert captured["pwm_validation_deterministic"] is True
+    finally:
+        service.close()
