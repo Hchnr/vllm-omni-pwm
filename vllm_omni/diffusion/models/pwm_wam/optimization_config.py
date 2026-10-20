@@ -18,6 +18,8 @@ class PwmOptimizationConfig:
     load_mode: str = "serial"
     approx_cache_threshold: float = 0.0
     cross_request_und_cache_bytes: int = 0
+    fp8_attention: bool = False
+    video_attention_splits: int = 0
 
     @classmethod
     def from_mapping(cls, value):
@@ -28,7 +30,7 @@ class PwmOptimizationConfig:
         if unknown:
             raise ValueError(f"Unknown PWM optimization options: {sorted(unknown)}")
         result = cls(**value)
-        for name in ("fuse_gate_up", "fuse_qkv", "cuda_graph"):
+        for name in ("fuse_gate_up", "fuse_qkv", "cuda_graph", "fp8_attention"):
             if type(getattr(result, name)) is not bool:
                 raise ValueError(f"{name} must be a boolean")
         if result.fp8_scope not in ("none", "mlp", "attention", "all"):
@@ -49,6 +51,8 @@ class PwmOptimizationConfig:
             raise ValueError("Approximate velocity cache cannot combine with CUDA Graph")
         if type(result.cross_request_und_cache_bytes) is not int or result.cross_request_und_cache_bytes < 0:
             raise ValueError("cross_request_und_cache_bytes must be a nonnegative integer")
+        if type(result.video_attention_splits) is not int or result.video_attention_splits not in (0, 1, 2, 4, 8, 16):
+            raise ValueError("video_attention_splits must be 0(auto),1,2,4,8 or 16")
         if type(result.graph_max_entries) is not int or not 1 <= result.graph_max_entries <= 16:
             raise ValueError("graph_max_entries must be an integer in [1,16]")
         return result

@@ -93,6 +93,7 @@ def pwm_fa3_attention(
     provider: str,
     max_seqlen_q: int = 0,
     max_seqlen_k: int = 0,
+    num_splits: int = 1,
 ) -> Tensor:
     """Keep the inference-only FA3 call opaque to Inductor with known metadata."""
     kwargs = dict(
@@ -105,7 +106,7 @@ def pwm_fa3_attention(
         max_seqlen_k=max_seqlen_k or k.shape[0],
         causal=causal,
         softmax_scale=q.shape[-1] ** -0.5,
-        num_splits=1,
+        num_splits=num_splits,
     )
     if provider == "flash3_nv":
         from flash_attn_3_nv.flash_attn_interface import flash_attn_varlen_func
@@ -127,6 +128,7 @@ def _pwm_fa3_attention_fake(
     provider: str,
     max_seqlen_q: int = 0,
     max_seqlen_k: int = 0,
+    num_splits: int = 1,
 ) -> Tensor:
     return torch.empty(q.shape, dtype=q.dtype, device=q.device)
 
@@ -140,7 +142,12 @@ def attention(
     backend: str = "sdpa",
     metadata: tuple[Tensor, Tensor] | None = None,
     max_seqlens: tuple[int, int] | None = None,
+    num_splits: int = 0,
 ) -> Tensor:
+    if backend == "flash3_fp8":
+        from .attention_fp8 import fp8_attention
+
+        return fp8_attention(q, k, v, metadata=metadata, num_splits=num_splits)
     if backend in ("flash3", "flash3_nv"):
         if metadata is None:
             metadata = (
@@ -148,7 +155,7 @@ def attention(
                 torch.tensor([0, k.shape[0]], dtype=torch.int32, device=k.device),
             )
         maximum = (q.shape[0], k.shape[0]) if max_seqlens is None else max_seqlens
-        return pwm_fa3_attention(q, k, v, *metadata, causal, backend, *maximum).flatten(1)
+        return pwm_fa3_attention(q, k, v, *metadata, causal, backend, *maximum, num_splits or 1).flatten(1)
     if backend != "sdpa":
         raise ValueError(f"Unsupported native PWM attention backend: {backend}")
     mask = torch.ones((q.shape[0], k.shape[0]), dtype=torch.bool, device=q.device)
@@ -249,6 +256,8 @@ class PwmThreeTowerLayer(nn.Module):
         super().__init__()
         self.self_attn = PwmAttentionWeights(width, video=True, heads=heads, kv_heads=kv_heads, dim=dim)
         self.attention_backend = "sdpa"
+        self.fp8_attention = False
+        self.video_attention_splits = 0
         self.sequence_parallel = None
         self.input_layernorm = PwmRMSNorm(width)
         self.input_layernorm_moe_gen = PwmRMSNorm(width)
@@ -314,7 +323,8 @@ class PwmThreeTowerLayer(nn.Module):
             rotate(qv, rope[1] if self.sequence_parallel is None else self.sequence_parallel.video_query_rope(rope[1])),
             video_keys,
             video_values,
-            backend=self.attention_backend,
+            backend="flash3_fp8" if self.fp8_attention else self.attention_backend,
+            num_splits=self.video_attention_splits,
             metadata=None if cu is None else (cu[1], cu[3]),
             max_seqlens=None if maximum is None else (maximum[1], maximum[3]),
         )

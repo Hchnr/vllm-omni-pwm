@@ -42,18 +42,61 @@ def main():
             "--output",
             str(args.output_dir / f"{name}.json"),
             "--warmup",
-            str(args.warmup),
+            str(profile.get("warmup", args.warmup)),
             "--repeats",
-            str(args.repeats),
+            str(profile.get("repeats", args.repeats)),
             "--input",
-            *args.input,
+            *profile.get("inputs", args.input),
         ]
+        if profile.get("engine"):
+            command = [
+                sys.executable,
+                "tools/pwm_wam/validate.py",
+                "--mode",
+                "engine",
+                "--native",
+                "--experimental-native-backend",
+                "--checkpoint",
+                "artifacts/pwm-wam-hf",
+                "--cosmos-root",
+                str(Path.cwd().parent / "cosmos-framework-pwm"),
+                "--python",
+                sys.executable,
+                "--vae",
+                "/share/project/eai_pwm/models/Cosmos3-Nano/vae",
+                "--tokenizer",
+                "/share/project/eai_pwm/models/Cosmos3-Nano-VLM",
+                "--attention-backend",
+                "flash3",
+                "--compile",
+                "--native-und-cache",
+                "--deterministic",
+                "--native-options",
+                str(options),
+                "--warmup",
+                str(profile.get("warmup", args.warmup)),
+                "--repeats",
+                str(profile.get("repeats", args.repeats)),
+                "--output",
+                str(args.output_dir / f"{name}.json"),
+                "--input",
+                *profile.get("inputs", args.input),
+            ]
+        command.extend(profile.get("args", []))
+        if "command" in profile:
+            command = [sys.executable, *profile["command"]]
         if profile.get("profile"):
             command.append("--profile")
-        event = dict(id=name, command=command, start=time.time())
+        visible = profile.get("gpus", os.environ.get("CUDA_VISIBLE_DEVICES", ""))
+        if not visible or any(gpu not in ("0", "1", "2", "3") for gpu in visible.split(",")):
+            raise ValueError("Suite GPU allocation must use explicit physical GPUs 0--3")
+        environment = dict(os.environ, CUDA_VISIBLE_DEVICES=visible)
+        event = dict(id=name, command=command, start=time.time(), cuda_visible_devices=visible)
         print(f"Starting {name}", flush=True)
         with (args.output_dir / f"{name}.log").open("w") as log:
-            event["exit_code"] = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT).returncode
+            event["exit_code"] = subprocess.run(
+                command, stdout=log, stderr=subprocess.STDOUT, env=environment
+            ).returncode
         event["end"] = time.time()
         events.append(event)
         (args.output_dir / "events.json").write_text(json.dumps(events, indent=2) + "\n")

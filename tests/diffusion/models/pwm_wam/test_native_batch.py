@@ -78,7 +78,7 @@ class _Runtime:
         return torch.tensor([1, *(ord(char) % 29 + 2 for char in caption), 2], dtype=torch.long)
 
 
-def _segmented_attention(q, k, v, cu_q, cu_k, causal, provider, max_seqlen_q=0, max_seqlen_k=0):
+def _segmented_attention(q, k, v, cu_q, cu_k, causal, provider, max_seqlen_q=0, max_seqlen_k=0, num_splits=1):
     q_lengths, k_lengths = cu_q.diff(), cu_k.diff()
     assert max_seqlen_q == q_lengths.max().item()
     assert max_seqlen_k == k_lengths.max().item()

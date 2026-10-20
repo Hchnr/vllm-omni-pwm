@@ -48,6 +48,8 @@ class PwmWamRuntime(nn.Module):
         approx_cache_threshold=0.0,
         sequence_parallel=False,
         cross_request_und_cache_bytes=0,
+        fp8_attention=False,
+        video_attention_splits=0,
     ):
         super().__init__()
         if attention_backend not in ("sdpa", "flash3", "flash3_nv"):
@@ -61,6 +63,9 @@ class PwmWamRuntime(nn.Module):
         self.compile_layers = compile_layers
         self.attention_backend = attention_backend
         self.cache_und = cache_und
+        self.fp8_attention = fp8_attention
+        if fp8_attention and (attention_backend != "flash3" or cfg_parallel or sequence_parallel):
+            raise ValueError("PWM FP8 attention requires bundled FA3 on one GPU")
         self.validation_deterministic = validation_deterministic
         self.cfg_parallel = PwmCfgParallel() if cfg_parallel else None
         self.sequence_parallel = None
@@ -106,6 +111,8 @@ class PwmWamRuntime(nn.Module):
             loading=self.transformer.load_info,
             sequence_parallel_size=self.sequence_parallel.world_size if self.sequence_parallel is not None else 1,
             cross_request_und_cache_bytes=cross_request_und_cache_bytes,
+            fp8_attention=fp8_attention,
+            video_attention_splits=video_attention_splits,
         )
         if fuse_gate_up or fuse_qkv:
             self.transformer.configure_fusions(gate_up=fuse_gate_up, qkv=fuse_qkv)
@@ -116,6 +123,8 @@ class PwmWamRuntime(nn.Module):
         for layer in self.transformer.language_model.model.layers:
             layer.attention_backend = attention_backend
             layer.sequence_parallel = self.sequence_parallel
+            layer.fp8_attention = fp8_attention
+            layer.video_attention_splits = video_attention_splits
         self.transformer.sequence_parallel = self.sequence_parallel
         if compile_layers:
             for index, layer in enumerate(self.transformer.language_model.model.layers):
@@ -222,7 +231,7 @@ class PwmWamRuntime(nn.Module):
         action_indices = torch.arange(request.action_length, device=self.device)
         projection = torch.full((request.action_length,), request.projection_id, dtype=torch.long, device=self.device)
         branches = []
-        for caption in (request.caption, request.negative_prompt):
+        for branch_index, caption in enumerate((request.caption, request.negative_prompt)):
             ids = self.text_ids(caption)
             grid = (video.shape[1], (video.shape[2] + 1) // 2, (video.shape[3] + 1) // 2)
             positions = position_ids(
@@ -233,7 +242,7 @@ class PwmWamRuntime(nn.Module):
             action_ropes = tuple(rotary(p, dtype=torch.bfloat16, action=True) for p in positions)
             # Per-request, per-CFG-branch ownership; never reused across calls.
             cache = [[] for _ in self.transformer.language_model.model.layers] if self.cache_und else None
-            if self.exact_und_cache is not None:
+            if self.exact_und_cache is not None and (branch_index == 0 or request.guidance != 1):
                 key = (
                     self._und_identity,
                     caption,
@@ -356,7 +365,9 @@ class PwmWamRuntime(nn.Module):
             raise
         if self.exact_und_cache is not None:
             for key, cache in self._pending_und:
-                self.exact_und_cache.commit(key, cache)
+                # Guidance intervals can leave the negative branch unexecuted.
+                if all(cache):
+                    self.exact_und_cache.commit(key, cache)
             result[0]["cross_request_und_cache"] = self.exact_und_cache.stats()
         self._pending_und = []
         return result
@@ -374,6 +385,7 @@ class PwmWamRuntime(nn.Module):
             or self.approx_cache_threshold
             or self.sequence_parallel is not None
             or self.exact_und_cache is not None
+            or self.fp8_attention
         ):
             raise ValueError("PWM fixed compute batching requires independent single-GPU execution")
         started = time.perf_counter()
