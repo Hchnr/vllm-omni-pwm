@@ -249,6 +249,7 @@ class PwmThreeTowerLayer(nn.Module):
         super().__init__()
         self.self_attn = PwmAttentionWeights(width, video=True, heads=heads, kv_heads=kv_heads, dim=dim)
         self.attention_backend = "sdpa"
+        self.sequence_parallel = None
         self.input_layernorm = PwmRMSNorm(width)
         self.input_layernorm_moe_gen = PwmRMSNorm(width)
         self.post_attention_layernorm = PwmRMSNorm(width)
@@ -283,6 +284,8 @@ class PwmThreeTowerLayer(nn.Module):
         # Preserve the uncached compiler fusion by retaining the linear output.
         ku = attn.k_norm(raw_ku)
         qv, kv, vv = attn.project(self.input_layernorm_moe_gen(video), "_moe_gen")
+        if self.sequence_parallel is not None:
+            kv, vv = self.sequence_parallel.gather_video_kv(kv, vv)
         qa, ka, va = act.project(act.input_layernorm(action))
         keys, values = (ku, kv, ka), (vu, vv, va)
         cu = attention_metadata
@@ -308,7 +311,7 @@ class PwmThreeTowerLayer(nn.Module):
             video_keys = video_keys.index_select(0, cu[4])
             video_values = video_values.index_select(0, cu[4])
         yv = attention(
-            rotate(qv, rope[1]),
+            rotate(qv, rope[1] if self.sequence_parallel is None else self.sequence_parallel.video_query_rope(rope[1])),
             video_keys,
             video_values,
             backend=self.attention_backend,
@@ -399,6 +402,7 @@ class PwmNormalizationBuffers(nn.Module):
 class PwmWamTransformer(nn.Module):
     def __init__(self, num_domains: int):
         super().__init__()
+        self.sequence_parallel = None
         self.language_model = PwmLanguageModel()
         self.vae2llm = nn.Linear(192, 4096)
         self.llm2vae = nn.Linear(4096, 192)
@@ -578,9 +582,13 @@ class PwmWamTransformer(nn.Module):
         und_cache: list[list[tuple[Tensor, Tensor, Tensor]]] | None = None,
         attention_metadata: AttentionMetadata | None = None,
     ) -> Streams:
+        if self.sequence_parallel is not None:
+            streams = self.sequence_parallel.shard_streams(streams)
         for index, layer in enumerate(self.language_model.model.layers):
             streams = layer(
                 streams, rope, action_rope, None if und_cache is None else und_cache[index], attention_metadata
             )
+        if self.sequence_parallel is not None:
+            streams = self.sequence_parallel.gather_streams(streams)
         stack = self.language_model.model
         return stack.norm(streams[0]), stack.norm_moe_gen(streams[1]), stack.norm_moe_gen_action(streams[2])

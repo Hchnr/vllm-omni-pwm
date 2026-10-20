@@ -50,6 +50,7 @@ class _Transformer(model.PwmWamTransformer):
     def __init__(self):
         nn.Module.__init__(self)
         self.language_model = _Language()
+        self.sequence_parallel = None
         self.vae2llm = nn.Linear(192, 32)
         self.llm2vae = nn.Linear(32, 192)
         self.time_embedder = model.PwmTimeEmbedding(32)
@@ -70,6 +71,8 @@ class _Runtime:
         self.graph_runner = None
         self.cfg_parallel = None
         self.approx_cache_threshold = 0.0
+        self.sequence_parallel = None
+        self.exact_und_cache = None
 
     def text_ids(self, caption):
         return torch.tensor([1, *(ord(char) % 29 + 2 for char in caption), 2], dtype=torch.long)

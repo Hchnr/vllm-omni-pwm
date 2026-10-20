@@ -32,6 +32,7 @@ class NativeService:
         validation_deterministic=False,
         optimization=None,
         cfg_parallel_size=1,
+        sp_size=1,
     ):
         from vllm_omni.diffusion.data import DiffusionParallelConfig, OmniDiffusionConfig
         from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
@@ -57,7 +58,7 @@ class NativeService:
             "native_und_cache": cache_und,
             "validation_deterministic": validation_deterministic,
             "optimization": optimization,
-            "world_size": cfg_parallel_size,
+            "world_size": cfg_parallel_size * sp_size,
             "max_concurrent_requests": 1,
             "output_dir": str(self.output_dir),
         }
@@ -66,7 +67,7 @@ class NativeService:
                 model=str(checkpoint),
                 model_class_name="PwmWamNativePipeline",
                 enforce_eager=True,
-                parallel_config=DiffusionParallelConfig(cfg_parallel_size=cfg_parallel_size),
+                parallel_config=DiffusionParallelConfig(cfg_parallel_size=cfg_parallel_size, allgather_degree=sp_size),
                 model_config={
                     "pwm_vae_path": str(vae),
                     "pwm_tokenizer_path": str(tokenizer),
@@ -208,6 +209,7 @@ def main():
     parser.add_argument("--cache-und", action="store_true", help="Enable request-local UND reuse")
     parser.add_argument("--optimization-config", type=Path, help="JSON native optimization options (experimental)")
     parser.add_argument("--cfg-parallel-size", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--sp-size", type=int, choices=(1, 2, 4), default=1)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8019)
     args = parser.parse_args()
@@ -223,6 +225,7 @@ def main():
         compile_layers=args.compile,
         optimization=json.loads(args.optimization_config.read_text()) if args.optimization_config else None,
         cfg_parallel_size=args.cfg_parallel_size,
+        sp_size=args.sp_size,
         experimental_backend=args.experimental_backend,
         validation_deterministic=args.deterministic,
     )

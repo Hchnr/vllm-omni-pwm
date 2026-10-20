@@ -39,12 +39,15 @@ class PwmWamRuntime(nn.Module):
         fuse_gate_up=False,
         fuse_qkv=False,
         fp8_scope="none",
+        fp8_scaling="tensor",
         cuda_graph=False,
         graph_max_entries=4,
         vae_fastpath="none",
         cfg_parallel=False,
         load_mode="serial",
         approx_cache_threshold=0.0,
+        sequence_parallel=False,
+        cross_request_und_cache_bytes=0,
     ):
         super().__init__()
         if attention_backend not in ("sdpa", "flash3", "flash3_nv"):
@@ -60,8 +63,27 @@ class PwmWamRuntime(nn.Module):
         self.cache_und = cache_und
         self.validation_deterministic = validation_deterministic
         self.cfg_parallel = PwmCfgParallel() if cfg_parallel else None
+        self.sequence_parallel = None
+        if sequence_parallel:
+            from .sequence_parallel import PwmVideoSequenceParallel
+
+            self.sequence_parallel = PwmVideoSequenceParallel()
+            if cfg_parallel or cuda_graph or fp8_scope != "none" or approx_cache_threshold:
+                raise ValueError("PWM VIDEO SP currently requires independent BF16 execution without CFG2/Graph/cache")
         self.approx_cache_threshold = approx_cache_threshold
         self.last_approx_report = None
+        self.exact_und_cache = None
+        self._pending_und = []
+        if cross_request_und_cache_bytes:
+            if not cache_und or cuda_graph or cfg_parallel or sequence_parallel:
+                raise ValueError(
+                    "Cross-request UND cache requires request-local UND and independent non-graph execution"
+                )
+            from .exact_cache import PwmExactUndCache
+
+            self.exact_und_cache = PwmExactUndCache(
+                num_layers=36, max_entries=8, max_bytes=cross_request_und_cache_bytes
+            )
         if approx_cache_threshold and (cuda_graph or cfg_parallel):
             raise ValueError("PWM approximate velocity cache cannot combine with Graph or CFG2")
         if validation_deterministic:
@@ -74,6 +96,7 @@ class PwmWamRuntime(nn.Module):
             fuse_gate_up=fuse_gate_up,
             fuse_qkv=fuse_qkv,
             fp8_scope=fp8_scope,
+            fp8_scaling=fp8_scaling,
             cuda_graph=cuda_graph,
             graph_max_entries=graph_max_entries,
             vae_fastpath=vae_fastpath,
@@ -81,15 +104,19 @@ class PwmWamRuntime(nn.Module):
             load_mode=load_mode,
             approx_cache_threshold=approx_cache_threshold,
             loading=self.transformer.load_info,
+            sequence_parallel_size=self.sequence_parallel.world_size if self.sequence_parallel is not None else 1,
+            cross_request_und_cache_bytes=cross_request_und_cache_bytes,
         )
         if fuse_gate_up or fuse_qkv:
             self.transformer.configure_fusions(gate_up=fuse_gate_up, qkv=fuse_qkv)
         if fp8_scope != "none":
             from .optimization_linear import install_video_fp8
 
-            self.optimization_info["fp8"] = install_video_fp8(self.transformer, scope=fp8_scope)
+            self.optimization_info["fp8"] = install_video_fp8(self.transformer, scope=fp8_scope, scaling=fp8_scaling)
         for layer in self.transformer.language_model.model.layers:
             layer.attention_backend = attention_backend
+            layer.sequence_parallel = self.sequence_parallel
+        self.transformer.sequence_parallel = self.sequence_parallel
         if compile_layers:
             for index, layer in enumerate(self.transformer.language_model.model.layers):
                 self.transformer.language_model.model.layers[index] = torch.compile(
@@ -133,6 +160,18 @@ class PwmWamRuntime(nn.Module):
 
             self.optimization_info["vae"] = install_pwm_vae_fastpath(self.vae, scope=vae_fastpath)
         self.eval()
+        # The cache belongs to one immutable worker/model. Weight replacement,
+        # backend changes or tokenizer replacement require a fresh worker.
+        self._und_identity = (
+            str(checkpoint.resolve()),
+            hashlib.sha256((checkpoint / "config.json").read_bytes()).hexdigest(),
+            attention_backend,
+            compile_layers,
+            fp8_scope,
+            fp8_scaling,
+            fuse_gate_up,
+            fuse_qkv,
+        )
 
     def text_ids(self, caption: str):
         ids = self.tokenizer.apply_chat_template(
@@ -174,6 +213,8 @@ class PwmWamRuntime(nn.Module):
             np.random.RandomState(request.seed).standard_normal((request.action_length, 128)).astype(np.float32)
         ).to(self.device)
         latent = torch.cat((video.flatten(), action.flatten()))
+        if self.sequence_parallel is not None:
+            latent = self.sequence_parallel.synchronize_latent(latent)
         if self.cfg_parallel is not None:
             latent = self.cfg_parallel.synchronize_latent(latent)
         video_size = video.numel()
@@ -192,12 +233,29 @@ class PwmWamRuntime(nn.Module):
             action_ropes = tuple(rotary(p, dtype=torch.bfloat16, action=True) for p in positions)
             # Per-request, per-CFG-branch ownership; never reused across calls.
             cache = [[] for _ in self.transformer.language_model.model.layers] if self.cache_und else None
+            if self.exact_und_cache is not None:
+                key = (
+                    self._und_identity,
+                    caption,
+                    grid,
+                    request.action_length,
+                    request.video_fps,
+                    request.action_fps,
+                    request.seam,
+                )
+                previous = self.exact_und_cache.borrow(key)
+                if previous is not None:
+                    cache = previous
+                self._pending_und.append((key, cache))
             attention_metadata = None
             if self.attention_backend in ("flash3", "flash3_nv"):
                 lengths = (len(ids), grid[0] * grid[1] * grid[2], request.action_length)
-                attention_metadata = tuple(
-                    torch.tensor([0, n], dtype=torch.int32, device=self.device) for n in (*lengths, sum(lengths))
-                )
+                if self.sequence_parallel is not None:
+                    attention_metadata = self.sequence_parallel.attention_metadata(*lengths, device=self.device)
+                else:
+                    attention_metadata = tuple(
+                        torch.tensor([0, n], dtype=torch.int32, device=self.device) for n in (*lengths, sum(lengths))
+                    )
             branches.append((ids, ropes, action_ropes, cache, attention_metadata))
         scheduler = FlowUniPCMultistepScheduler(
             num_train_timesteps=1000,
@@ -271,6 +329,7 @@ class PwmWamRuntime(nn.Module):
     @torch.inference_mode()
     def forward(self, raw: dict):
         started = time.perf_counter()
+        self._pending_und = []
         request = prepare_request(raw, self.spec)
         reproducibility = configure_validation(request.seed) if self.validation_deterministic else None
         clean = self.encode_observation(request)
@@ -284,10 +343,23 @@ class PwmWamRuntime(nn.Module):
         try:
             with limits:
                 video, normalized = self.sample(request, clean)
+        except BaseException:
+            self._pending_und = []
+            raise
         finally:
             if self.graph_runner is not None:
                 self.graph_runner.end_request()
-        return self._finalize(request, video, normalized, started, reproducibility)
+        try:
+            result = self._finalize(request, video, normalized, started, reproducibility)
+        except BaseException:
+            self._pending_und = []
+            raise
+        if self.exact_und_cache is not None:
+            for key, cache in self._pending_und:
+                self.exact_und_cache.commit(key, cache)
+            result[0]["cross_request_und_cache"] = self.exact_und_cache.stats()
+        self._pending_und = []
+        return result
 
     @torch.inference_mode()
     def forward_batch(self, raws: list[dict]):
@@ -296,8 +368,14 @@ class PwmWamRuntime(nn.Module):
 
         if not 1 <= len(raws) <= 4:
             raise ValueError("PWM fixed compute batching supports 1--4 requests")
-        if self.graph_runner is not None or self.cfg_parallel is not None or self.approx_cache_threshold:
-            raise ValueError("PWM fixed compute batching cannot combine with Graph, CFG2 or approximate cache")
+        if (
+            self.graph_runner is not None
+            or self.cfg_parallel is not None
+            or self.approx_cache_threshold
+            or self.sequence_parallel is not None
+            or self.exact_und_cache is not None
+        ):
+            raise ValueError("PWM fixed compute batching requires independent single-GPU execution")
         started = time.perf_counter()
         requests = [prepare_request(raw, self.spec) for raw in raws]
         reproducibility = [

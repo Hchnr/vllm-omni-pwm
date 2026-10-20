@@ -147,6 +147,8 @@ def test_runtime_cfg2_matches_sequential_unipc_and_halves_branch_calls():
         result.cfg_parallel = parallel
         result.graph_runner = None
         result.approx_cache_threshold = 0.0
+        result.sequence_parallel = None
+        result.exact_und_cache = None
         result.transformer = Transformer()
         result.text_ids = lambda caption: torch.tensor([0 if caption == "positive" else 1])
         return result
@@ -192,5 +194,5 @@ def test_pipeline_routes_cfg2_and_rejects_other_parallel_topologies(monkeypatch)
         model_config=model_config,
         parallel_config=DiffusionParallelConfig(tensor_parallel_size=2),
     )
-    with pytest.raises(ValueError, match="TP/SP/PP"):
+    with pytest.raises(ValueError, match="pure VIDEO all-gather"):
         pipeline.PwmWamNativePipeline(od_config=config)

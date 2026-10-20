@@ -25,8 +25,15 @@ class PwmWamNativePipeline(nn.Module):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__()
         cfg_size = od_config.parallel_config.cfg_parallel_size
-        if cfg_size not in (1, 2) or od_config.parallel_config.world_size != cfg_size:
-            raise ValueError("Native PWM supports one GPU or two CFG-only ranks; TP/SP/PP are not supported")
+        sp_size = od_config.parallel_config.allgather_degree
+        if (
+            cfg_size not in (1, 2)
+            or sp_size not in (1, 2, 4)
+            or cfg_size > 1
+            and sp_size > 1
+            or od_config.parallel_config.world_size != cfg_size * sp_size
+        ):
+            raise ValueError("Native PWM supports single GPU, CFG2 or pure VIDEO all-gather SP2/SP4")
         if od_config.step_execution or od_config.max_num_seqs != 1:
             raise ValueError("Native PWM requires request execution with max_num_seqs=1")
         if not od_config.enforce_eager:
@@ -47,6 +54,8 @@ class PwmWamNativePipeline(nn.Module):
         experimental = config.get("pwm_experimental_backend", False)
         if cfg_size == 2 and not experimental:
             raise ValueError("PWM CFG2 requires pwm_experimental_backend")
+        if sp_size > 1 and not experimental:
+            raise ValueError("PWM VIDEO SP requires pwm_experimental_backend")
         if not experimental and config.get("pwm_attention_backend", "sdpa") != "sdpa":
             raise ValueError("Native PWM defaults to SDPA only; FA3 requires pwm_experimental_backend")
         if not experimental and config.get("pwm_compile", False):
@@ -69,6 +78,7 @@ class PwmWamNativePipeline(nn.Module):
             cache_und=config.get("pwm_native_und_cache", False),
             validation_deterministic=config.get("pwm_validation_deterministic", False),
             cfg_parallel=cfg_size == 2,
+            sequence_parallel=sp_size > 1,
             **optimization.runtime_kwargs(),
         )
         self._loaded_parameters = set(dict(self.named_parameters()))

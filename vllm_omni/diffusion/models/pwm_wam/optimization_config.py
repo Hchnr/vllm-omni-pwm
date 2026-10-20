@@ -11,11 +11,13 @@ class PwmOptimizationConfig:
     fuse_gate_up: bool = False
     fuse_qkv: bool = False
     fp8_scope: str = "none"
+    fp8_scaling: str = "tensor"
     cuda_graph: bool = False
     graph_max_entries: int = 4
     vae_fastpath: str = "none"
     load_mode: str = "serial"
     approx_cache_threshold: float = 0.0
+    cross_request_und_cache_bytes: int = 0
 
     @classmethod
     def from_mapping(cls, value):
@@ -31,6 +33,8 @@ class PwmOptimizationConfig:
                 raise ValueError(f"{name} must be a boolean")
         if result.fp8_scope not in ("none", "mlp", "attention", "all"):
             raise ValueError("fp8_scope must be none, mlp, attention or all")
+        if result.fp8_scaling not in ("tensor", "row"):
+            raise ValueError("fp8_scaling must be tensor or row")
         if result.vae_fastpath not in ("none", "encoder", "decoder", "all"):
             raise ValueError("vae_fastpath must be none, encoder, decoder or all")
         if result.load_mode not in ("serial", "async_h2d"):
@@ -43,6 +47,8 @@ class PwmOptimizationConfig:
             raise ValueError("approx_cache_threshold must be a finite nonnegative number")
         if result.approx_cache_threshold and result.cuda_graph:
             raise ValueError("Approximate velocity cache cannot combine with CUDA Graph")
+        if type(result.cross_request_und_cache_bytes) is not int or result.cross_request_und_cache_bytes < 0:
+            raise ValueError("cross_request_und_cache_bytes must be a nonnegative integer")
         if type(result.graph_max_entries) is not int or not 1 <= result.graph_max_entries <= 16:
             raise ValueError("graph_max_entries must be an integer in [1,16]")
         return result

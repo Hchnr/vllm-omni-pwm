@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--native", action="store_true")
     parser.add_argument("--native-und-cache", action="store_true")
     parser.add_argument("--cfg-parallel-size", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--sp-size", type=int, choices=(1, 2, 4), default=1)
     parser.add_argument(
         "--native-options", type=Path, help="JSON PWM optimization options; requires experimental native"
     )
@@ -62,6 +63,8 @@ def main():
     native_options = json.loads(args.native_options.read_text()) if args.native_options else {}
     if args.cfg_parallel_size != 1 and not (args.native and args.mode == "engine"):
         parser.error("--cfg-parallel-size=2 requires native engine mode")
+    if args.sp_size != 1 and not (args.native and args.mode == "engine"):
+        parser.error("--sp-size requires native engine mode")
     if args.mode == "worker" and args.attention_backend == "flash3_nv":
         parser.error("Reference worker selects NVIDIA FA3 with --attention-backend flash3")
     if args.experimental_native_backend and not args.native:
@@ -214,7 +217,9 @@ def main():
                 model=str(args.checkpoint),
                 model_class_name="PwmWamNativePipeline" if args.native else "PwmWamPipeline",
                 enforce_eager=True,
-                parallel_config=DiffusionParallelConfig(cfg_parallel_size=args.cfg_parallel_size),
+                parallel_config=DiffusionParallelConfig(
+                    cfg_parallel_size=args.cfg_parallel_size, allgather_degree=args.sp_size
+                ),
                 model_config={
                     "pwm_python": str(args.python),
                     "pwm_cosmos_root": str(args.cosmos_root),
