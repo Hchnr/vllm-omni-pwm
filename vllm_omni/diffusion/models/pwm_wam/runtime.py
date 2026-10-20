@@ -260,6 +260,36 @@ class PwmWamRuntime(nn.Module):
         finally:
             if self.graph_runner is not None:
                 self.graph_runner.end_request()
+        return self._finalize(request, video, normalized, started, reproducibility)
+
+    @torch.inference_mode()
+    def forward_batch(self, raws: list[dict]):
+        """Experimental fixed-shape compute batch, independent from serving queues."""
+        from .batch import sample_batch
+
+        if not 1 <= len(raws) <= 4:
+            raise ValueError("PWM fixed compute batching supports 1--4 requests")
+        if self.graph_runner is not None or self.cfg_parallel is not None:
+            raise ValueError("PWM fixed compute batching cannot combine with Graph or CFG2")
+        started = time.perf_counter()
+        requests = [prepare_request(raw, self.spec) for raw in raws]
+        reproducibility = [
+            configure_validation(request.seed) if self.validation_deterministic else None for request in requests
+        ]
+        clean = [self.encode_observation(request) for request in requests]
+        limits = (
+            torch._dynamo.config.patch(recompile_limit=512, accumulated_recompile_limit=4096)
+            if self.compile_layers
+            else nullcontext()
+        )
+        with limits:
+            sampled = sample_batch(self, requests, clean)
+        return [
+            self._finalize(request, video, action, started, settings)
+            for request, (video, action), settings in zip(requests, sampled, reproducibility, strict=True)
+        ]
+
+    def _finalize(self, request, video, normalized, started, reproducibility):
         normalized = normalized.float()
         normalizer = self.transformer.action_normalization
         domain = request.normalization_id

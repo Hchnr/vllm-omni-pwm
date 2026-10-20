@@ -20,6 +20,12 @@ from torch import Tensor, nn
 
 Rope = tuple[Tensor, Tensor]
 Streams = tuple[Tensor, Tensor, Tensor]
+# The extended form is emitted only by fixed-shape request batching: the
+# permutation packs each sample's UND/VIDEO/ACTION keys, followed by exact
+# per-sample maximum lengths. Four-tensor metadata retains the B1 contract.
+AttentionMetadata = (
+    tuple[Tensor, Tensor, Tensor, Tensor] | tuple[Tensor, Tensor, Tensor, Tensor, Tensor, tuple[int, int, int, int]]
+)
 
 
 def _linear_with_weight(weight: Tensor, *, requires_grad: bool) -> nn.Linear:
@@ -78,7 +84,15 @@ def rotate(x: Tensor, rope: Rope) -> Tensor:
 
 @torch.library.custom_op("vllm_omni::pwm_fa3_attention", mutates_args=())
 def pwm_fa3_attention(
-    q: Tensor, k: Tensor, v: Tensor, cu_q: Tensor, cu_k: Tensor, causal: bool, provider: str
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    cu_q: Tensor,
+    cu_k: Tensor,
+    causal: bool,
+    provider: str,
+    max_seqlen_q: int = 0,
+    max_seqlen_k: int = 0,
 ) -> Tensor:
     """Keep the inference-only FA3 call opaque to Inductor with known metadata."""
     kwargs = dict(
@@ -87,8 +101,8 @@ def pwm_fa3_attention(
         v=v.contiguous(),
         cu_seqlens_q=cu_q,
         cu_seqlens_k=cu_k,
-        max_seqlen_q=q.shape[0],
-        max_seqlen_k=k.shape[0],
+        max_seqlen_q=max_seqlen_q or q.shape[0],
+        max_seqlen_k=max_seqlen_k or k.shape[0],
         causal=causal,
         softmax_scale=q.shape[-1] ** -0.5,
         num_splits=1,
@@ -104,7 +118,15 @@ def pwm_fa3_attention(
 
 @pwm_fa3_attention.register_fake
 def _pwm_fa3_attention_fake(
-    q: Tensor, k: Tensor, v: Tensor, cu_q: Tensor, cu_k: Tensor, causal: bool, provider: str
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    cu_q: Tensor,
+    cu_k: Tensor,
+    causal: bool,
+    provider: str,
+    max_seqlen_q: int = 0,
+    max_seqlen_k: int = 0,
 ) -> Tensor:
     return torch.empty(q.shape, dtype=q.dtype, device=q.device)
 
@@ -117,6 +139,7 @@ def attention(
     causal: bool = False,
     backend: str = "sdpa",
     metadata: tuple[Tensor, Tensor] | None = None,
+    max_seqlens: tuple[int, int] | None = None,
 ) -> Tensor:
     if backend in ("flash3", "flash3_nv"):
         if metadata is None:
@@ -124,7 +147,8 @@ def attention(
                 torch.tensor([0, q.shape[0]], dtype=torch.int32, device=q.device),
                 torch.tensor([0, k.shape[0]], dtype=torch.int32, device=k.device),
             )
-        return pwm_fa3_attention(q, k, v, *metadata, causal, backend).flatten(1)
+        maximum = (q.shape[0], k.shape[0]) if max_seqlens is None else max_seqlens
+        return pwm_fa3_attention(q, k, v, *metadata, causal, backend, *maximum).flatten(1)
     if backend != "sdpa":
         raise ValueError(f"Unsupported native PWM attention backend: {backend}")
     mask = torch.ones((q.shape[0], k.shape[0]), dtype=torch.bool, device=q.device)
@@ -246,7 +270,7 @@ class PwmThreeTowerLayer(nn.Module):
         rope: tuple[Rope, Rope, Rope],
         action_rope: tuple[Rope, Rope, Rope],
         und_cache: list[tuple[Tensor, Tensor, Tensor]] | None = None,
-        attention_metadata: tuple[Tensor, Tensor, Tensor, Tensor] | None = None,
+        attention_metadata: AttentionMetadata | None = None,
     ) -> Streams:
         und, video, action = streams
         attn, act = self.self_attn, self.action_block_moe_gen_action
@@ -262,6 +286,12 @@ class PwmThreeTowerLayer(nn.Module):
         qa, ka, va = act.project(act.input_layernorm(action))
         keys, values = (ku, kv, ka), (vu, vv, va)
         cu = attention_metadata
+        packed = cu is not None and len(cu) == 6
+        if packed and self.attention_backend not in ("flash3", "flash3_nv"):
+            raise ValueError("Packed PWM request batches require Flash Attention 3")
+        if cu is not None and len(cu) not in (4, 6):
+            raise ValueError("PWM attention metadata requires 4 tensors or the fixed-batch extension")
+        maximum = cu[5] if packed else None
         if not cached:
             yu = attention(
                 rotate(qu, rope[0]),
@@ -270,20 +300,31 @@ class PwmThreeTowerLayer(nn.Module):
                 causal=True,
                 backend=self.attention_backend,
                 metadata=None if cu is None else (cu[0], cu[0]),
+                max_seqlens=None if maximum is None else (maximum[0], maximum[0]),
             )
+        video_keys = torch.cat([rotate(k, r) for k, r in zip(keys, rope)])
+        video_values = torch.cat(values)
+        if packed:
+            video_keys = video_keys.index_select(0, cu[4])
+            video_values = video_values.index_select(0, cu[4])
         yv = attention(
             rotate(qv, rope[1]),
-            torch.cat([rotate(k, r) for k, r in zip(keys, rope)]),
-            torch.cat(values),
+            video_keys,
+            video_values,
             backend=self.attention_backend,
             metadata=None if cu is None else (cu[1], cu[3]),
+            max_seqlens=None if maximum is None else (maximum[1], maximum[3]),
         )
+        action_keys = torch.cat([rotate(k, r) for k, r in zip(keys, action_rope)])
+        if packed:
+            action_keys = action_keys.index_select(0, cu[4])
         ya = attention(
             rotate(qa, action_rope[2]),
-            torch.cat([rotate(k, r) for k, r in zip(keys, action_rope)]),
-            torch.cat(values),
+            action_keys,
+            video_values if packed else torch.cat(values),
             backend=self.attention_backend,
             metadata=None if cu is None else (cu[2], cu[3]),
+            max_seqlens=None if maximum is None else (maximum[2], maximum[3]),
         )
         action = action + act.o_proj(ya)
         action = action + act.mlp(act.post_attention_layernorm(action))
@@ -535,7 +576,7 @@ class PwmWamTransformer(nn.Module):
         rope: tuple[Rope, Rope, Rope],
         action_rope: tuple[Rope, Rope, Rope],
         und_cache: list[list[tuple[Tensor, Tensor, Tensor]]] | None = None,
-        attention_metadata: tuple[Tensor, Tensor, Tensor, Tensor] | None = None,
+        attention_metadata: AttentionMetadata | None = None,
     ) -> Streams:
         for index, layer in enumerate(self.language_model.model.layers):
             streams = layer(
