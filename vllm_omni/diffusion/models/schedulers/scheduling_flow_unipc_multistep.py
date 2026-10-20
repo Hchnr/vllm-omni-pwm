@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 # Adapted from https://github.com/hao-ai-lab/FastVideo
 # Originally from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/schedulers/scheduling_unipc_multistep.py
 # Convert unipc for flow matching
@@ -65,6 +65,12 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             The way the timesteps should be scaled.
         final_sigmas_type (`str`, defaults to `"zero"`):
             The final `sigma` value for the noise schedule. Either `"zero"` or `"sigma_min"`.
+        use_legacy_corrector (`bool`, defaults to `False`):
+            Reproduce PyTorch 2.10 CUDA 2x2 corrector rounding for frozen
+            checkpoints. Requires CPU coefficients and solver_order=2.
+        use_cpu_coefficients (`bool`, defaults to `False`):
+            Keep scalar schedule arithmetic on CPU for checkpoint runtimes that
+            require that numerical convention. Tensor state remains on its device.
     """
 
     _compatibles = [e.name for e in KarrasDiffusionSchedulers]
@@ -89,6 +95,8 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
         timestep_spacing: str = "linspace",
         steps_offset: int = 0,
         final_sigmas_type: str | None = "zero",
+        use_cpu_coefficients: bool = False,
+        use_legacy_corrector: bool = False,
         **kwargs,
     ):
         if solver_type not in ["bh1", "bh2"]:
@@ -97,6 +105,8 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             else:
                 raise NotImplementedError(f"{solver_type} is not implemented for {self.__class__}")
 
+        if use_legacy_corrector and (not use_cpu_coefficients or solver_order != 2):
+            raise ValueError("Legacy corrector requires CPU coefficients and solver_order=2")
         self.predict_x0 = predict_x0
         self.num_inference_steps: int | None = None
 
@@ -298,12 +308,12 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
                 "is now handled via an internal counter `self.step_index`",
             )
 
-        sigma = self.sigmas[self.step_index].to(sample.device)
+        sigma = self._coefficient_sigma(self.step_index, sample.device)
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma)
 
         if self.predict_x0:
             if self.config.prediction_type == "flow_prediction":
-                sigma_t = sigma.to(sample.device)
+                sigma_t = sigma
                 x0_pred = sample - sigma_t * model_output
             else:
                 raise ValueError(
@@ -317,7 +327,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             return x0_pred
         else:
             if self.config.prediction_type == "flow_prediction":
-                sigma_t = sigma.to(sample.device)
+                sigma_t = sigma
                 epsilon = sample - (1 - sigma_t) * model_output
             else:
                 raise ValueError(
@@ -326,7 +336,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
                 )
 
             if self.config.thresholding:
-                sigma_t = sigma.to(sample.device)
+                sigma_t = sigma
                 x0_pred = sample - sigma_t * model_output
                 x0_pred = self._threshold_sample(x0_pred)
                 epsilon = model_output + x0_pred
@@ -382,8 +392,8 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
 
         device = sample.device
         sigma_t, sigma_s0 = (
-            self.sigmas[self.step_index + 1].to(device),
-            self.sigmas[self.step_index].to(device),
+            self._coefficient_sigma(self.step_index + 1, device),
+            self._coefficient_sigma(self.step_index, device),
         )
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s0, sigma_s0 = self._sigma_to_alpha_sigma_t(sigma_s0)
@@ -398,7 +408,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
         for i in range(1, order):
             si = self.step_index - i
             mi = model_output_list[-(i + 1)]
-            alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(self.sigmas[si].to(device))
+            alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(self._coefficient_sigma(si, device))
             lambda_si = torch.log(alpha_si) - torch.log(sigma_si)
             rk = (lambda_si - lambda_s0) / h
             rks.append(rk)
@@ -406,7 +416,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             D1s.append((mi - m0) / rk)
 
         rks.append(1.0)
-        rks = torch.tensor(rks, device=device)
+        rks = torch.tensor(rks, device="cpu" if self.config.use_legacy_corrector else device)
 
         R = []
         b = []
@@ -431,7 +441,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             h_phi_k = h_phi_k / hh - 1 / factorial_i
 
         R = torch.stack(R)
-        b = torch.tensor(b, device=device)
+        b = torch.tensor(b, device="cpu" if self.config.use_legacy_corrector else device)
 
         if D1s is not None and len(D1s) > 0:
             D1s = torch.stack(D1s, dim=1)
@@ -514,8 +524,8 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
 
         device = this_sample.device
         sigma_t, sigma_s0 = (
-            self.sigmas[self.step_index].to(device),
-            self.sigmas[self.step_index - 1].to(device),
+            self._coefficient_sigma(self.step_index, device),
+            self._coefficient_sigma(self.step_index - 1, device),
         )
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s0, sigma_s0 = self._sigma_to_alpha_sigma_t(sigma_s0)
@@ -530,7 +540,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
         for i in range(1, order):
             si = self.step_index - (i + 1)
             mi = model_output_list[-(i + 1)]
-            alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(self.sigmas[si].to(device))
+            alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(self._coefficient_sigma(si, device))
             lambda_si = torch.log(alpha_si) - torch.log(sigma_si)
             rk = (lambda_si - lambda_s0) / h
             rks.append(rk)
@@ -538,7 +548,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             D1s.append((mi - m0) / rk)
 
         rks.append(1.0)
-        rks = torch.tensor(rks, device=device)
+        rks = torch.tensor(rks, device="cpu" if self.config.use_legacy_corrector else device)
 
         R = []
         b = []
@@ -563,7 +573,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             h_phi_k = h_phi_k / hh - 1 / factorial_i
 
         R = torch.stack(R)
-        b = torch.tensor(b, device=device)
+        b = torch.tensor(b, device="cpu" if self.config.use_legacy_corrector else device)
 
         if D1s is not None and len(D1s) > 0:
             D1s = torch.stack(D1s, dim=1)
@@ -572,6 +582,16 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
 
         if order == 1:
             rhos_c = torch.tensor([0.5], dtype=x.dtype, device=device)
+        elif self.config.use_legacy_corrector:
+            # PyTorch 2.10's CUDA 2x2 solve used this elimination order for
+            # R=[[1,1],[rk,1]]. Newer solvers round the small first result
+            # differently, which can amplify across BF16 model evaluations.
+            # Emulate the FP32 fused numerator with exact FP64 intermediates
+            # on CPU, then round before FP32 division and back substitution.
+            rk = R[1, 0]
+            numerator = (b[1].double() - rk.double() * b[0].double()).float()
+            second = numerator / (1 - rk)
+            rhos_c = torch.stack((b[0] - second, second)).to(device=device, dtype=x.dtype)
         else:
             rhos_c = safe_linalg_solve(R, b).to(device).to(x.dtype)
 
@@ -614,6 +634,16 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             self._step_index = self.index_for_timestep(timestep)
         else:
             self._step_index = self._begin_index
+
+    def _coefficient_sigma(self, index: int, device: torch.device) -> torch.Tensor:
+        """Optionally preserve CPU scalar arithmetic used by legacy checkpoints.
+
+        CPU and CUDA log/expm1 and scalar promotion can produce different
+        trajectories with BF16 velocity and FP32 state. Default behavior keeps
+        coefficients on the sample device; PWM opts into its reference policy.
+        """
+        sigma = self.sigmas[index]
+        return sigma if self.config.use_cpu_coefficients else sigma.to(device)
 
     def step(
         self,
