@@ -17,6 +17,7 @@ from transformers import AutoTokenizer
 from vllm_omni.diffusion.models.schedulers.scheduling_flow_unipc_multistep import FlowUniPCMultistepScheduler
 
 from .positions import position_ids, rotary
+from .reproducibility import configure_validation
 from .request import PwmRequest, prepare_request
 from .transformer_pwm_wam import PwmWamTransformer
 from .vae import preserve_checkpoint_rms
@@ -33,6 +34,7 @@ class PwmWamRuntime(nn.Module):
         attention_backend="sdpa",
         compile_layers=False,
         cache_und=False,
+        validation_deterministic=False,
     ):
         super().__init__()
         if attention_backend not in ("sdpa", "flash3", "flash3_nv"):
@@ -46,6 +48,9 @@ class PwmWamRuntime(nn.Module):
         self.compile_layers = compile_layers
         self.attention_backend = attention_backend
         self.cache_und = cache_und
+        self.validation_deterministic = validation_deterministic
+        if validation_deterministic:
+            configure_validation(0)
         self.device = device
         config = json.loads((checkpoint / "config.json").read_text())["model"]["config"]
         self.spec = config["action128_spec"]
@@ -197,6 +202,7 @@ class PwmWamRuntime(nn.Module):
     def forward(self, raw: dict):
         started = time.perf_counter()
         request = prepare_request(raw, self.spec)
+        reproducibility = configure_validation(request.seed) if self.validation_deterministic else None
         clean = self.encode_observation(request)
         # Two CFG branches and cache fill/reuse specialize each input shape.
         # Match the reference capacity, scoped to this serialized worker call.
@@ -235,6 +241,8 @@ class PwmWamRuntime(nn.Module):
             elapsed_seconds=time.perf_counter() - started,
         )
         frames = None
+        if reproducibility is not None:
+            result["reproducibility"] = reproducibility
         if request.return_video:
             mean, inverse = self.vae_scale()
             decoded = self.vae.decode((video[None].to(torch.bfloat16) / inverse) + mean, return_dict=False)[0]

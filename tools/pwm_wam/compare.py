@@ -110,6 +110,7 @@ def main():
     keys = ("precision", "steps", "warmup", "repeats", "input")
     ra, ca = reference.get("args", {}), candidate.get("args", {})
     comparable = all(key in ra and ra[key] == ca.get(key) for key in keys)
+    comparable = comparable and ra.get("deterministic", False) == ca.get("deterministic", False)
     comparable = comparable and ra.get("warmup", 0) >= 2 and ra.get("repeats", 0) >= 3
     comparable = comparable and reference.get("cuda_visible_devices") == candidate.get("cuda_visible_devices")
     comparable = comparable and len(reference["runs"]) == len(candidate["runs"])

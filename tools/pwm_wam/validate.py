@@ -14,6 +14,7 @@ import math
 import os
 import statistics
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -41,7 +42,11 @@ def main():
     parser.add_argument("--check-invalid-request", action="store_true")
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--deterministic", action="store_true", help="Strict seeded validation; record worker settings")
+    parser.add_argument("--save-videos", type=Path, help="Save raw frames and review MP4s outside the request timer")
     args = parser.parse_args()
+    if args.deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     if args.native and (args.mode not in ("engine", "runtime") or not args.vae or not args.tokenizer):
         parser.error("--native requires engine/runtime mode, --vae, and --tokenizer")
     if args.native and (args.reuse_und or args.projected_und or args.precision != "bfloat16"):
@@ -87,6 +92,18 @@ def main():
         )
 
     result["gpu_processes_before"] = gpu_snapshot()
+    video_buffer = []
+
+    def collect_video(frames, fps):
+        video_buffer[:] = [(frames, fps)]
+        return {
+            "shape": list(frames.shape),
+            "dtype": str(frames.dtype),
+            "sha256": hashlib.sha256(frames.tobytes()).hexdigest(),
+            "std": float(frames.std()),
+            "fps": fps,
+        }
+
     started = time.perf_counter()
     if args.mode == "worker":
         command = [
@@ -108,6 +125,11 @@ def main():
             command += ["--reuse-und"]
         if args.projected_und:
             command += ["--projected-und"]
+        if args.deterministic:
+            command += ["--deterministic"]
+        transport = tempfile.TemporaryDirectory(prefix="pwm-video-") if args.save_videos else None
+        if transport:
+            command += ["--transport-dir", transport.name]
         env = dict(
             os.environ, PYTHONPATH=str(args.cosmos_root), COSMOS_TRAINING="0", LD_LIBRARY_PATH="", OMP_NUM_THREADS="1"
         )
@@ -132,12 +154,19 @@ def main():
             response = json.loads(process.stdout.readline())
             if "error" in response:
                 raise RuntimeError(response)
+            if response.get("video"):
+                import numpy as np
+
+                frames = np.load(Path(transport.name) / "video.npy", allow_pickle=False)
+                response["result"]["video"] = collect_video(frames, response["video_fps"])
             return response["result"]
 
         def close():
             process.stdin.close()
             process.wait(timeout=30)
             log.close()
+            if transport:
+                transport.cleanup()
     elif args.mode == "runtime":
         import torch
 
@@ -150,13 +179,16 @@ def main():
             attention_backend=args.attention_backend,
             compile_layers=args.compile,
             cache_und=args.native_und_cache,
+            validation_deterministic=args.deterministic,
         )
         result["experimental_runtime_only"] = True
         result["runtime"] = {"torch": torch.__version__}
 
         def run(request, index):
             with torch.inference_mode():
-                output, _, _ = model(request)
+                output, frames, fps = model(request)
+            if frames is not None:
+                output["video"] = collect_video(frames, fps)
             return output
 
         def close():
@@ -178,6 +210,7 @@ def main():
                     "pwm_compile": args.compile,
                     "pwm_experimental_backend": args.experimental_native_backend,
                     "pwm_native_und_cache": args.native_und_cache,
+                    "pwm_validation_deterministic": args.deterministic,
                     "pwm_reuse_und": args.reuse_und,
                     "pwm_projected_und": args.projected_und,
                     "pwm_precision": args.precision,
@@ -211,13 +244,7 @@ def main():
             output = {"action": mm["actions"], **mm["metadata"]["actions"]}
             if request.get("extra", {}).get("action128", {}).get("return_video", True):
                 video = outputs[0].images[0]
-                output["video"] = {
-                    "shape": list(video.shape),
-                    "dtype": str(video.dtype),
-                    "sha256": hashlib.sha256(video.tobytes()).hexdigest(),
-                    "std": float(video.std()),
-                    "fps": mm["fps"],
-                }
+                output["video"] = collect_video(video, mm["fps"])
             return output
 
         def close():
@@ -247,6 +274,18 @@ def main():
                 started = time.perf_counter()
                 output = run(request, repetition * len(requests) + index)
                 elapsed = time.perf_counter() - started
+                if args.save_videos and video_buffer and repetition >= args.warmup:
+                    import imageio.v2 as imageio
+                    import numpy as np
+
+                    args.save_videos.mkdir(parents=True, exist_ok=True)
+                    stem = args.save_videos / f"r{repetition - args.warmup:03d}_i{index:03d}"
+                    frames, fps = video_buffer[0]
+                    np.save(stem.with_suffix(".npy"), frames, allow_pickle=False)
+                    imageio.mimwrite(stem.with_suffix(".mp4"), frames, fps=fps, codec="libx264", macro_block_size=1)
+                    output["video"]["raw_path"] = str(stem.with_suffix(".npy").resolve())
+                    output["video"]["review_path"] = str(stem.with_suffix(".mp4").resolve())
+                video_buffer.clear()
                 phase = "warmup" if repetition < args.warmup else "measure"
                 print(f"{phase} repetition={repetition} request={index} seconds={elapsed:.6f}", flush=True)
                 if repetition >= args.warmup:

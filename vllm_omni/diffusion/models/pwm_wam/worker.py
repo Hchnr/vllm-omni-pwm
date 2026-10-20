@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--reuse-und", action="store_true")
     parser.add_argument("--projected-und", action="store_true")
+    parser.add_argument("--deterministic", action="store_true", help="Strict opt-in numerical-validation controls")
     args = parser.parse_args()
     if args.compile and args.reuse_und and not args.projected_und:
         parser.error("Compiled UND reuse requires --projected-und; normalized-key caching failed validation")
@@ -100,6 +101,11 @@ def main():
                     raw = json.loads(line)
                     if raw == {"shutdown": True}:
                         break
+                    reproducibility = None
+                    if args.deterministic:
+                        from reproducibility import configure_validation
+
+                        reproducibility = configure_validation(int(raw["seed"]))
                     started = time.perf_counter()
                     request = OmniSampleOverrides.model_validate(raw)
                     with tempfile.TemporaryDirectory(dir=scratch) as request_dir:
@@ -155,6 +161,7 @@ def main():
                                         batch["ai_caption"][0].encode()
                                     ).hexdigest(),
                                     "elapsed_seconds": time.perf_counter() - started,
+                                    **({"reproducibility": reproducibility} if reproducibility is not None else {}),
                                 },
                             }
                         )

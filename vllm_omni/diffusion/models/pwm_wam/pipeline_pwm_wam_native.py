@@ -58,6 +58,7 @@ class PwmWamNativePipeline(nn.Module):
             attention_backend=config.get("pwm_attention_backend", "sdpa"),
             compile_layers=config.get("pwm_compile", False),
             cache_und=config.get("pwm_native_und_cache", False),
+            validation_deterministic=config.get("pwm_validation_deterministic", False),
         )
         self._loaded_parameters = set(dict(self.named_parameters()))
 
