@@ -397,9 +397,27 @@ tests passed. No full-repository CI claim is made.
 
 Same-GPU controlled attribution established approximately 130 ms from equivalent
 reference preparation changes, 68 ms from UND reuse, and 40 ms from the FA3
-provider, out of a 344 ms same-GPU ladder difference. A remaining 106 ms native
-execution/environment term is being separated by full-runtime environment A/B/A
-and prepared-reference stage profiling. Neither the partial sum nor the residual
-is evidence of a vLLM scheduler benefit. Commands and raw results are preserved
-under `artifacts/validation/acceptance_1020/`; the local Cosmos report contains
-conditions, limitations and the quality gallery link.
+provider, out of a 344 ms same-GPU ladder difference. Full-runtime environment
+A/B/A found only about 4 ms from the environment stack (0.56 ms drift), with
+identical observed actions. The remaining approximately 102 ms belongs to the
+native execution path, not the scheduler. An equivalent GPU-canvas ablation in
+the reference saves about 46 ms; after hash/GPU-canvas preparation, same-GPU,
+same-environment, same-provider stage diagnostics leave about 53 ms between
+reference worker and native runtime, including about 21 ms in network intervals.
+Those diagnostic intervals contain host submission gaps and are not pure kernel
+times. The canvas experiment used another allowed GPU, so these stage numbers
+corroborate the residual mechanism and scale rather than form an exact additive
+partition. The engine wrapper itself shows no scheduling speedup.
+
+The tested preset completes **engineering acceptance with disclosed BF16
+numerical warnings**, not robot closed-loop qualification. Machine-readable
+results are in `artifacts/validation/acceptance_1020/final_acceptance.json`, with
+evidence hashes, profile limits, the four warning inputs and final attribution.
+Earlier failed summaries retain their original status and link to this separate
+joint assessment. Commands/raw outputs are preserved in the same directory.
+The local Cosmos `plans/v0.3.0e_vllm/report_1019.md` contains full conditions and
+source references; `quality_1020/review/index.html` contains the video gallery.
+The gains principally reflect portable preparation, request-local reuse,
+provider and specialized execution changes. Porting those optimizations to
+Cosmos would narrow this comparison; true vLLM scheduling/batching advantages
+require a separate implementation and controlled comparison.
