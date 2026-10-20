@@ -47,14 +47,9 @@ def test_fastpath_preserves_norms_and_full_small_vae(scope):
     report = install_pwm_vae_fastpath(vae, scope=scope)
     assert report["norm_modules_preserved"] == count
     assert report["conv_count"] > 0
-    assert (
-        all(
-            name.startswith((scope, "quant_conv" if scope == "encoder" else "post_quant_conv"))
-            for name in report["modules"]
-        )
-        if scope != "all"
-        else True
-    )
+    if scope != "all":
+        prefixes = (scope, "quant_conv" if scope == "encoder" else "post_quant_conv")
+        assert all(name.startswith(prefixes) for name in report["modules"])
     for name, module in vae.named_modules():
         if isinstance(module, WanRMS_norm):
             assert module.forward.__func__ is _checkpoint_rms_forward

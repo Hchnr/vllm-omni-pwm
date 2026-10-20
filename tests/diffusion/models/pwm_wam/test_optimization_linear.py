@@ -128,3 +128,20 @@ def test_scaled_mm_fake_shape_dtype_and_alignment():
         assert output.dtype == torch.bfloat16
         with pytest.raises(ValueError, match="divisible by 16"):
             pwm_fp8_scaled_mm(x[:7], weight, scale, scale)
+
+
+@pytest.mark.parametrize("scope,per_layer", [("mlp", 2), ("attention", 2), ("all", 4)])
+def test_install_quantizes_fused_video_projections_once(scope, per_layer):
+    model = _transformer()
+    for layer in model.language_model.model.layers:
+        layer.configure_fusions(gate_up=True, qkv=True)
+    before = {name: value.clone() for name, value in model.state_dict().items()}
+    report = install_video_fp8(model, scope)
+    assert report["module_count"] == 2 * per_layer
+    for record in report["modules"]:
+        linear = model.get_submodule(record["name"])
+        source = before[record["name"] + ".weight"]
+        expected, scale = quantize_fp8_per_tensor(source)
+        torch.testing.assert_close(linear.weight_fp8.float(), expected.float(), atol=0, rtol=0)
+        torch.testing.assert_close(linear.weight_scale, scale, atol=0, rtol=0)
+        assert any(part in record["name"] for part in ("gate_up_proj", "down_proj", "qkv_proj", "o_proj_moe_gen"))

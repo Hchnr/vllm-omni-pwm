@@ -12,7 +12,7 @@ opaque custom op. This is not FP8 attention: Q/K/V passed to FA3 remain BF16.
 Install after HF loading and before compiling layers. Checkpoint loading and
 saving through the transformed module are intentionally unsupported. ACTION,
 UND, norms, embeddings, output adapters and the VAE remain unchanged. VIDEO
-QKV/gate-up projection fusion is currently an incompatible option.
+QKV/gate-up fusion may be installed first; quantize its packed matrices once.
 """
 
 from __future__ import annotations
@@ -95,9 +95,9 @@ class PwmFP8Linear(nn.Module):
             raise ValueError("PWM FP8 linear in/out features must be positive multiples of 16")
         if weight.dtype != torch.bfloat16 or weight.device.type not in ("cpu", "cuda"):
             raise ValueError("PWM FP8 conversion requires loaded BF16 weights on CPU or CUDA")
+        started = time.perf_counter()
         if not torch.isfinite(weight).all().item():
             raise ValueError("PWM FP8 conversion rejects nonfinite weights")
-        started = time.perf_counter()
         with torch.no_grad():
             quantized, scale = quantize_fp8_per_tensor(weight.detach())
             delta = quantized.float() * scale - weight.float()
@@ -153,6 +153,8 @@ def install_video_fp8(transformer: nn.Module, scope: str = "mlp") -> dict[str, o
 
     ``mlp`` converts gate/up/down in ``mlp_moe_gen``; ``attention`` converts
     Q/K/V/O in ``self_attn`` with suffix ``_moe_gen``; ``all`` selects both.
+    Already-fused gate/up and QKV matrices are supported and count as one
+    quantized linear each. Configure fusion before installing FP8.
     The returned report describes one-time weight error/cost. Request-time
     activation quantization/padding cost requires measured end-to-end ablation.
     """
@@ -182,14 +184,17 @@ def install_video_fp8(transformer: nn.Module, scope: str = "mlp") -> dict[str, o
             owner = getattr(layer, owner_name, None)
             if not isinstance(owner, nn.Module):
                 raise ValueError(f"Missing native VIDEO module: layer {index}.{owner_name}")
-            # Also catches fused implementations that retain the old parameters.
-            if any("qkv" in name or "gate_up" in name for name in owner._modules):
-                raise ValueError("PWM VIDEO FP8 and fused QKV/gate-up projections cannot be combined")
+            fused_name = "gate_up_proj" if owner_name == "mlp_moe_gen" else "qkv_proj_moe_gen"
+            if getattr(owner, fused_name, None) is not None:
+                original_names = leaves[:-1]
+                if any(getattr(owner, name, None) is not None for name in original_names):
+                    raise ValueError("PWM VIDEO FP8 rejects ambiguous fused and unfused projection ownership")
+                leaves = (fused_name, leaves[-1])
             for leaf in leaves:
                 linear = getattr(owner, leaf, None)
                 path = f"language_model.model.layers.{index}.{owner_name}.{leaf}"
                 if type(linear) is not nn.Linear or linear.bias is not None:
-                    raise ValueError(f"PWM VIDEO FP8 requires an unfused, unquantized bias-free nn.Linear: {path}")
+                    raise ValueError(f"PWM VIDEO FP8 requires an unquantized bias-free nn.Linear: {path}")
                 if linear.weight.dtype != torch.bfloat16:
                     raise ValueError(f"PWM VIDEO FP8 requires loaded BF16 weights: {path}")
                 if any(size < 1 or size % _ALIGNMENT for size in linear.weight.shape):
