@@ -386,3 +386,14 @@ warning cases matched the independent reference, while BF16 errors remain
 reported; FP32 SDPA is not a performance baseline. Final strict-profile service
 stress, twenty-repeat qualification and full-request provider attribution are
 tracked in `artifacts/validation/acceptance_1020/`.
+
+The strict-profile twenty-repeat GPU3 A/B/A qualification measured p50
+2.370831/2.032670/2.376116 seconds (reference/native/reference), or 14.3–14.5%
+lower latency and 16.7–17.0% higher request throughput. This replaces the older
+shared-GPU 19% headline for the strict profile. The current HTTP profile passed
+1000 mixed-domain isolation requests and independent process restart replay.
+All 1214 exported tensors also matched their DCP source in shape, dtype and
+value. Numerical warnings remain explicitly reported under the joint
+numerical/video assessment; these results do not establish robot task success.
+Whole-request provider ablation found approximately 40 ms from bundled FA3;
+the remaining native/runtime-environment contribution is being isolated.
