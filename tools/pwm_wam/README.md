@@ -82,14 +82,15 @@ Two 1,000-request small-resolution stress runs (cache off/on) had exact
 replay hashes. A real HTTP disconnect retained model ownership until completion
 and recovered with exact actions.
 
-Deployment acceptance is **limited to the tested LIBERO profiles**. The baseline
-is Cosmos FA3 + per-layer compile + request-local metadata reuse, with HTTP CUDA
-Graph, UND compute caching and QKV fusion disabled. Native bundled FA3 + compile
-+ raw UND projection caching passes the two LIBERO inputs at 5 and 35 steps.
-On shared-GPU A/B/A, the 5-step profile improves median latency by 16–17% and
-throughput by 19% against that optimized baseline. Cross-domain correctness is
-not complete: DROID fails the locked tolerance. Both FA3 modes remain explicitly
-experimental. Eager SDPA is a numerical reference only.
+The current validation policy combines full numerical comparison, controlled
+randomness, FP32 diagnostics and generated-video review; cross-backend bitwise
+identity is not required. Four of eleven strict BF16 quality cases retain action
+warnings. These warnings remain visible alongside the full FP32 and video
+results below. The current strict FA3 + compile profile improves latency by
+14.3–14.5% and throughput by 16.7–17.0% against the existing optimized Cosmos
+baseline. This is a batch-one, concurrency-one implementation result, with no
+scheduler/batching gain established. FA3/compile still require the explicit
+experimental option; the following SDPA and earlier FA3 results are historical.
 
 On the task's shared H100 80GB, same-GPU A/B/A against eager SDPA (two inputs,
 two warmups and twenty measurements per input per stage), native UND caching
@@ -189,7 +190,7 @@ HTTP validation supports `--attention-backend flash3_nv --compile --cache-und
 remain unchanged because expanded optimized-reference validation has failures.
 
 
-### Corrected measured results (2026-10-20)
+### Historical FA3 results before strict joint validation (2026-10-20)
 
 Two complete LIBERO requests, 960×640, 40 actions / 2 seconds, 5 denoising steps,
 CFG 1.5, BF16, seeds 42/43, actions only; each stage has 2 warmups and 20 measured
@@ -238,7 +239,7 @@ The machine-readable corrected summary is `optimized_acceptance_1020.json`;
 the old `final_native_acceptance.json` is marked as historical SDPA-only evidence.
 
 
-### Attribution and numerical ablation (2026-10-20)
+### Historical attribution and numerical ablation (2026-10-20)
 
 On the same shared GPU1, current native FA3 + compile + metadata, changing only
 request-local UND caching (off/on/off, two warmups and five measured calls per
@@ -365,35 +366,40 @@ not an automatic acceptance threshold. Full evidence and video gallery are in
 limitations and the remaining attribution gap are recorded in the local Cosmos
 `plans/v0.3.0e_vllm/report_1019.md`, sections 9–10.
 
-#### Remaining acceptance work
-
-Overall acceptance is still open. The next controlled experiment uses one
-physical GPU for the sequence reference → reference with equivalent preparation
-optimizations → native without UND reuse → native with UND reuse → reference.
-All profiles retain FA3 + compile and identical deterministic settings. This
-will separate portable preparation changes, residual path differences and
-UND reuse at a common end-to-end boundary, with reference drift reported.
-Four action-warning cases also receive FP32 SDPA reference/native diagnostic
-runs. Those runs check structural/numerical fidelity only and cannot qualify
-performance against the optimized baseline. Commands and process provenance
-are recorded under `artifacts/validation/acceptance_1020/`.
+#### Current engineering validation (2026-10-20)
 
 For HTTP numerical/service validation, pass `--deterministic` and set
 `PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8` before startup. `/info` exposes
 `validation_deterministic`; each action output records effective settings.
-The default remains unchanged. Full FP32 diagnostic replay of the four BF16
+The default remains unchanged. Full FP32 diagnostic replay of all four BF16
 warning cases matched the independent reference, while BF16 errors remain
-reported; FP32 SDPA is not a performance baseline. Final strict-profile service
-stress, twenty-repeat qualification and full-request provider attribution are
-tracked in `artifacts/validation/acceptance_1020/`.
+reported. The diagnostic loads transformer parameters and RoPE in FP32 and
+retains checkpoint BF16 VAE; it is not a production FP32 engine option or a
+performance baseline. All 1214 exported tensors matched DCP shape/dtype/value.
 
 The strict-profile twenty-repeat GPU3 A/B/A qualification measured p50
 2.370831/2.032670/2.376116 seconds (reference/native/reference), or 14.3–14.5%
-lower latency and 16.7–17.0% higher request throughput. This replaces the older
-shared-GPU 19% headline for the strict profile. The current HTTP profile passed
-1000 mixed-domain isolation requests and independent process restart replay.
-All 1214 exported tensors also matched their DCP source in shape, dtype and
-value. Numerical warnings remain explicitly reported under the joint
-numerical/video assessment; these results do not establish robot task success.
-Whole-request provider ablation found approximately 40 ms from bundled FA3;
-the remaining native/runtime-environment contribution is being isolated.
+lower latency and 16.7–17.0% higher request throughput. There were two complete
+LIBERO inputs, each with two warmups and twenty formal calls per profile;
+sequences were 6938/6967 tokens, batch one, concurrency one, 5 steps, CFG 1.5,
+action-only, 960×640, 40 actions and 41 video frames. Both sides used FA3 +
+per-layer compile + metadata reuse. Reference NV FA3 had UND reuse disabled;
+native bundled FA3 enabled request-local UND reuse. The legacy numerical gate
+still reports a warning for the second input; it was not silently relaxed.
+
+The current HTTP profile passed 1000 mixed-domain isolation requests and
+independent process restart replay, plus the original client's video download,
+invalid-request recovery, concurrent rejection and disconnect recovery.
+The stress cases use smaller images and do not qualify full-size performance.
+Regression logs record 50 passed / 9 skipped in the main suite, with all skipped
+scopes separately exercised: 6 Hopper FA3 tests and 8 independent reference
+tests passed. No full-repository CI claim is made.
+
+Same-GPU controlled attribution established approximately 130 ms from equivalent
+reference preparation changes, 68 ms from UND reuse, and 40 ms from the FA3
+provider, out of a 344 ms same-GPU ladder difference. A remaining 106 ms native
+execution/environment term is being separated by full-runtime environment A/B/A
+and prepared-reference stage profiling. Neither the partial sum nor the residual
+is evidence of a vLLM scheduler benefit. Commands and raw results are preserved
+under `artifacts/validation/acceptance_1020/`; the local Cosmos report contains
+conditions, limitations and the quality gallery link.
