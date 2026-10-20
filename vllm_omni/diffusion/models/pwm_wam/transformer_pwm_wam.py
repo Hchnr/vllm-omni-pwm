@@ -381,7 +381,38 @@ class PwmWamTransformer(nn.Module):
             layer.configure_fusions(gate_up=gate_up, qkv=qkv)
 
     @classmethod
-    def from_pretrained(cls, path: Path, *, device: str = "cuda", dtype: torch.dtype = torch.bfloat16):
+    def from_pretrained(
+        cls,
+        path: Path,
+        *,
+        device: str | torch.device = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+        load_mode: str = "serial",
+    ):
+        """Load the original HF parameter tree, optionally batching H2D waits.
+
+        ``async_h2d`` enqueues nonblocking CUDA transfers, retaining each CPU
+        source tensor until an explicit synchronization at the shard boundary.
+        This bounds pending sources to one shard and guarantees ready weights
+        on return, including when the caller's current device differs from the
+        requested target. CPU loading never initializes an accelerator.
+
+        ``load_info`` contains host wall times. Safetensors reads are mmap
+        views: page faults, dtype conversion and transfer waits can occur in
+        ``transfer_enqueue_wall_seconds``; it is not pure GPU copy time.
+        """
+        import time
+
+        if load_mode not in ("serial", "async_h2d"):
+            raise ValueError("PWM load_mode must be serial or async_h2d; shard prefetch is not implemented")
+        started = time.perf_counter()
+        target_device = torch.device(device)
+        async_cuda = load_mode == "async_h2d" and target_device.type == "cuda"
+        read_wall = 0.0
+        transfer_wall = 0.0
+        sync_wall = 0.0
+        sync_count = 0
+        loaded_bytes = 0
         config = json.loads((path / "config.json").read_text())["model"]["config"]
         if config["tower_structure"] != "three_tower" or config["action_tower_preset"] != "width_only_1b":
             raise ValueError("Native PWM requires Nano width_only_1b three-tower weights")
@@ -395,19 +426,52 @@ class PwmWamTransformer(nn.Module):
                 f"HF tensor mismatch: missing={set(expected) - set(source)}, extra={set(source) - set(expected)}"
             )
         parameters = set(dict(model.named_parameters()))
-        for shard in sorted(set(source.values())):
+        shards = sorted(set(source.values()))
+        for shard in shards:
             with safe_open(path / shard, framework="pt", device="cpu") as tensors:
-                for name, filename in source.items():
-                    if filename != shard:
-                        continue
-                    value = tensors.get_tensor("model.net." + name)
-                    if value.shape != expected[name].shape:
-                        raise ValueError(f"HF shape mismatch for {name}: {value.shape} != {expected[name].shape}")
-                    target_dtype = dtype if name in parameters else expected[name].dtype
-                    value = value.to(device=device, dtype=target_dtype)
-                    owner, _, leaf = name.rpartition(".")
-                    module = model.get_submodule(owner) if owner else model
-                    setattr(module, leaf, nn.Parameter(value, requires_grad=False) if name in parameters else value)
+                pending_sources = []
+                try:
+                    for name, filename in source.items():
+                        if filename != shard:
+                            continue
+                        read_started = time.perf_counter()
+                        value = tensors.get_tensor("model.net." + name)
+                        read_wall += time.perf_counter() - read_started
+                        if value.shape != expected[name].shape:
+                            raise ValueError(f"HF shape mismatch for {name}: {value.shape} != {expected[name].shape}")
+                        target_dtype = dtype if name in parameters else expected[name].dtype
+                        if async_cuda:
+                            pending_sources.append(value)
+                        transfer_started = time.perf_counter()
+                        value = value.to(device=target_device, dtype=target_dtype, non_blocking=async_cuda)
+                        transfer_wall += time.perf_counter() - transfer_started
+                        loaded_bytes += value.numel() * value.element_size()
+                        owner, _, leaf = name.rpartition(".")
+                        module = model.get_submodule(owner) if owner else model
+                        setattr(module, leaf, nn.Parameter(value, requires_grad=False) if name in parameters else value)
+                finally:
+                    # Also drain already-enqueued copies if a later key/shape
+                    # or transfer fails, before closing the mmap-backed shard.
+                    if pending_sources:
+                        sync_started = time.perf_counter()
+                        torch.accelerator.synchronize(target_device)
+                        sync_wall += time.perf_counter() - sync_started
+                        sync_count += 1
+                        pending_sources.clear()
+        model.load_info = dict(
+            mode=load_mode,
+            device=str(target_device),
+            non_blocking_cuda=async_cuda,
+            tensor_count=len(source),
+            shard_count=len(shards),
+            loaded_tensor_bytes=loaded_bytes,
+            tensor_read_wall_seconds=read_wall,
+            transfer_enqueue_wall_seconds=transfer_wall,
+            synchronization_wall_seconds=sync_wall,
+            synchronization_count=sync_count,
+            max_pending_source_shards=1 if async_cuda else 0,
+            load_wall_seconds=time.perf_counter() - started,
+        )
         return model.eval()
 
     def encode_inputs(
