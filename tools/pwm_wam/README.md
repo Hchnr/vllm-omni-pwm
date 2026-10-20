@@ -377,3 +377,12 @@ Four action-warning cases also receive FP32 SDPA reference/native diagnostic
 runs. Those runs check structural/numerical fidelity only and cannot qualify
 performance against the optimized baseline. Commands and process provenance
 are recorded under `artifacts/validation/acceptance_1020/`.
+
+For HTTP numerical/service validation, pass `--deterministic` and set
+`PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8` before startup. `/info` exposes
+`validation_deterministic`; each action output records effective settings.
+The default remains unchanged. Full FP32 diagnostic replay of the four BF16
+warning cases matched the independent reference, while BF16 errors remain
+reported; FP32 SDPA is not a performance baseline. Final strict-profile service
+stress, twenty-repeat qualification and full-request provider attribution are
+tracked in `artifacts/validation/acceptance_1020/`.
