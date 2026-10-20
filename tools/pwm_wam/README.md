@@ -204,8 +204,11 @@ runs per request on the same shared H100 GPU1:
 All 40 candidate outputs pass both references at normalized active-slot
 max-abs ≤ 0.05 and RMSE ≤ 0.01. Evidence:
 `artifacts/validation/final_fa3_ab_1020_{reference_before,candidate,reference_after,comparison_before,comparison_after}.json`.
-This measures the integrated implementation, not an isolated scheduler benefit:
-UND caching can also be implemented in Cosmos. There is no real batching or
+This measures the integrated implementation, not an isolated scheduler benefit.
+The existing result does not quantify individual contributions: UND caching is
+a plausible source, but a same-revision cache-off/on/off ablation is required
+before attributing the measured gain to it. UND caching can also be implemented
+in Cosmos. There is no real batching or
 continuous-batching throughput result. Startup remains slower (128 s versus
 53 s, excluding request warmups). Shared co-tenant GPU load limits generalization.
 
