@@ -364,3 +364,16 @@ not an automatic acceptance threshold. Full evidence and video gallery are in
 `artifacts/validation/quality_1020/review/`; detailed conditions, sequence lengths,
 limitations and the remaining attribution gap are recorded in the local Cosmos
 `plans/v0.3.0e_vllm/report_1019.md`, sections 9–10.
+
+#### Remaining acceptance work
+
+Overall acceptance is still open. The next controlled experiment uses one
+physical GPU for the sequence reference → reference with equivalent preparation
+optimizations → native without UND reuse → native with UND reuse → reference.
+All profiles retain FA3 + compile and identical deterministic settings. This
+will separate portable preparation changes, residual path differences and
+UND reuse at a common end-to-end boundary, with reference drift reported.
+Four action-warning cases also receive FP32 SDPA reference/native diagnostic
+runs. Those runs check structural/numerical fidelity only and cannot qualify
+performance against the optimized baseline. Commands and process provenance
+are recorded under `artifacts/validation/acceptance_1020/`.
