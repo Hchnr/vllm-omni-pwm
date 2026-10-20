@@ -320,3 +320,47 @@ Similarity metrics are diagnostics, not proof of task success; the tool leaves
 visual assessment pending. Existing action thresholds remain visible warnings,
 and domain/units/mask/finite-value contracts remain mandatory. Quality runs
 include video decoding and are not action-only performance measurements.
+
+#### Additional attribution evidence (2026-10-20)
+
+The reference computes `stable_hash(model.config.action128_spec)` on every
+request, including recursive OmegaConf conversion. A same-process reference
+experiment on physical GPU3 changed only precomputation of that immutable
+fingerprint; batch contract checks remained active. Off/on/off, each with two
+warmups and ten measured calls, gave worker medians 2335.65/2250.01/2339.73 ms:
+85.64–89.72 ms saved (3.67–3.83%). All 36 action outputs matched. Evidence:
+`artifacts/validation/reference_hash_ablation_summary_1020.json` and raw protocol.
+This is a portable CPU optimization, not a vLLM scheduler benefit.
+
+A CPU-only preparation ablation replaced zero-padding plus concatenation with
+one zero allocation and a copy of the observation. Full canvas tensors and
+prepared fields matched, excluding the deliberately fresh UUID output directory.
+Five warmups and thirty measurements per phase gave preparation medians
+84.51/46.57/84.94 ms, saving 37.93–38.37 ms in that stage. Evidence:
+`artifacts/validation/canvas_allocation_ablation_1020.json`.
+This does not measure the complete benefit of the native latent-first path and
+is not an engine benchmark. Both changes remain diagnostic artifacts; the
+Cosmos production baseline was not modified. Neither percentage can be added
+to the earlier shared-GPU 19% result or to the separate UND-cache ablation.
+
+#### Joint validation results (2026-10-20)
+
+The quality matrix completed 66 calls: 11 inputs, two repeats, three profiles
+(reference, native cached, native uncached), on physical GPUs 0/1/2. Each profile
+used batch one and request concurrency one. Same-seed action/raw-video repeats
+were stable in all 33 pairs; cache on/off outputs also matched in this strict
+configuration. This is observed repeatability, not a cross-backend bitwise gate.
+Cross-backend video SSIM ranged from 0.982677 to 0.998688. Sampled keyframes showed
+similar scene structure and motion, with local edge/texture differences; this
+was not a blind video study or robot success-rate test.
+
+Seven of eleven inputs met the existing action diagnostic thresholds. Four
+retained warnings, notably DROID 35-step seed43 with normalized max error 0.181374
+and RMSE 0.015455. High video similarity does not erase action warnings. The
+corresponding worst normalized point has source-unit error 0.002610; the maximum
+across all physical slots is 0.021286, so these must not be confused. Different
+slots can have different units. Reference seed-variation controls give context,
+not an automatic acceptance threshold. Full evidence and video gallery are in
+`artifacts/validation/quality_1020/review/`; detailed conditions, sequence lengths,
+limitations and the remaining attribution gap are recorded in the local Cosmos
+`plans/v0.3.0e_vllm/report_1019.md`, sections 9–10.
