@@ -236,3 +236,32 @@ Evidence: `artifacts/validation/fa3_1020_http_validation.json`. This is not a
 FA3 video or long-duration stress test. The validation server was shut down.
 The machine-readable corrected summary is `optimized_acceptance_1020.json`;
 the old `final_native_acceptance.json` is marked as historical SDPA-only evidence.
+
+
+### Attribution and numerical ablation (2026-10-20)
+
+On the same shared GPU1, current native FA3 + compile + metadata, changing only
+request-local UND caching (off/on/off, two warmups and five measured calls per
+input per stage) gives median request latency 4.15742 / 3.99242 / 4.14356 s.
+Cache-on saves 0.151–0.165 s (3.65–3.97% median latency). This does **not** explain
+the earlier entire 16–17% latency reduction. Do not subtract these timings from
+the older Cosmos measurements across different load windows. Evidence:
+`artifacts/validation/und_ablation_1020_summary.json`.
+
+The two LIBERO outputs pass the normalized gate both against optimized Cosmos
+and cache-off, but cache-on/off are not bitwise equal (max-abs 0.03037/0.03946,
+RMSE 0.00735/0.00943). Four-domain cache-off ablation reveals a cache-specific
+DROID discrepancy: on/off max-abs 0.03862, RMSE 0.01031 fails. Cache-off DROID
+also fails the Cosmos RMSE gate (0.010307). RoboCasa, RoboTwin EEF and joint are
+bitwise equal on/off, while joint still fails against Cosmos. Both compiled
+native execution and caching need numerical fixes; tiny cache unit tests do
+not establish full-model equivalence. See `native_fa3_domains_cache_ablation_1020.json`.
+
+Frozen real Q/K/V kernel probes on GPU0 show the bundled FA3 is faster than NV
+FA3 for the tested UND/ACTION/VIDEO shapes. These are isolated kernel results,
+not a percentage of complete-request gain, and provider outputs differ.
+Evidence: `fa3_provider_kernel_profile_1020.json`. Compiler/version and framework
+contributions remain unquantified; no scheduler or batching gain is established.
+
+Resource constraint for further task validation: physical GPUs 0–3 only.
+Earlier GPU6 results predate this constraint; no new tests may use GPUs 4–7.
